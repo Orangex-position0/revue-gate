@@ -119,6 +119,7 @@ main.tsx setupServerEvents()
 ```
 
 - **事件是唯一权威源**：前端"启动/停止服务"按钮调 `serverApi.start()` → 按钮 `loading` 态 → 等事件回调最终同步，**不自改 store**，状态永远与后端一致
+- **首挂载校准（唯一例外）**：webview 晚于启动事件加载，会错过 boot 事件，故 `setupServerEvents()` 启动时经 `get_server_status` 校准一次初始状态——写入的仍是后端权威状态，不是前端自改；此后常规刷新一律靠事件
 - 事件常驻监听，不随 App 生命周期清理
 
 ### 主题应用
