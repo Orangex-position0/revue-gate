@@ -29,7 +29,7 @@ tauri-plugin-opener = "2"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "sync", "time"] }
 tracing = "0.1"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

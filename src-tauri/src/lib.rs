@@ -5,7 +5,12 @@ pub mod infrastructure;
 pub mod interface;
 #[cfg(test)]
 mod test_support;
+pub mod usecases;
 
+use infrastructure::sqlite::channel::SqliteChannelRepository;
+use interface::commands::channel::{
+    create_channel, delete_channel, list_channels, set_channel_enabled, update_channel,
+};
 use interface::commands::server::{
     DEFAULT_HOST, DEFAULT_PORT, ServerStatus, get_server_status, start_server, stop_server,
 };
@@ -25,7 +30,12 @@ pub fn run() {
             greet,
             get_server_status,
             start_server,
-            stop_server
+            stop_server,
+            list_channels,
+            create_channel,
+            update_channel,
+            delete_channel,
+            set_channel_enabled
         ])
         .setup(|app| {
             // 1) SQLite 连接池 + 内嵌迁移：失败即启动失败（业务数据层不可用则无意义运行）。
@@ -36,7 +46,10 @@ pub fn run() {
                 .to_str()
                 .ok_or("app data dir path is not valid utf8")?;
             let pool = tauri::async_runtime::block_on(infrastructure::sqlite::init_pool(db_path))?;
-            app.manage(pool);
+            app.manage(pool.clone());
+
+            // 1b) 渠道仓储入 state（命令层经 tauri::State 访问；后续密钥/日志仓储同款接入）。
+            app.manage(SqliteChannelRepository::new(pool));
 
             // 2) 服务管理器入 state（命令层经 tauri::State 访问）。
             let server = ServerManager::new();

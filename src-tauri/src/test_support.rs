@@ -9,9 +9,29 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::api_key::{ApiKey, ApiKeyRepository};
-use crate::domain::channel::{Channel, ChannelRepository};
+use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
 use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
+
+/// 构造一条最小 Channel 测试样本（供各层测试复用）。
+pub(crate) fn sample_channel() -> Channel {
+    Channel {
+        id: Uuid::now_v7(),
+        name: "openai-prod".to_string(),
+        channel_type: ChannelType::OpenAi,
+        base_url: Some("https://api.openai.com/v1".to_string()),
+        api_key: Some("sk-upstream".to_string()),
+        models: vec!["gpt-4o".to_string()],
+        priority: 0,
+        weight: 1,
+        model_mappings: Vec::new(),
+        enabled: true,
+        last_test_at: None,
+        last_test_ok: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
 
 /// 内存版 ChannelRepository：以 Vec<Channel> 为后端，upsert 语义的 save。
 #[derive(Default)]
@@ -52,7 +72,12 @@ impl ChannelRepository for InMemoryChannelRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
-        self.channels.write().unwrap().retain(|c| c.id != id);
+        let mut guard = self.channels.write().unwrap();
+        let before = guard.len();
+        guard.retain(|c| c.id != id);
+        if guard.len() == before {
+            return Err(RepositoryError::NotFound);
+        }
         Ok(())
     }
 }
@@ -150,24 +175,6 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-
-    /// 构造一条最小 Channel 测试样本。
-    fn sample_channel() -> Channel {
-        Channel {
-            id: Uuid::now_v7(),
-            name: "openai-prod".to_string(),
-            channel_type: crate::domain::channel::ChannelType::OpenAi,
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            api_key: Some("sk-upstream".to_string()),
-            models: vec!["gpt-4o".to_string()],
-            priority: 0,
-            weight: 1,
-            model_mappings: Vec::new(),
-            enabled: true,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
 
     /// seam A 验证：内存 ChannelRepository 可被引用为 `Box<dyn ChannelRepository>`
     /// （编译通过）并具备基本 CRUD 行为。
