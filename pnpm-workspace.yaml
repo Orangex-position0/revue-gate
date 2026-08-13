@@ -1,0 +1,3 @@
+# pnpm 工作区配置（pnpm 11 起，构建设置在此，不再读 package.json 的 pnpm 字段）
+allowBuilds:
+  esbuild: true
