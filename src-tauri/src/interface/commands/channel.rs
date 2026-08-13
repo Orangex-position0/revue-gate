@@ -1,4 +1,4 @@
-//! 控制面：渠道管理命令（list / create / update / delete / set_enabled）。
+//! 控制面：渠道管理命令（list / create / update / delete / set_enabled / test）。
 //!
 //! 命令是薄胶水：解析入参 → 调 usecases → 返回。返回前统一遮蔽上游密钥
 //! （`mask_api_key`），保证控制面任何路径都不把上游密钥回显给前端
@@ -7,11 +7,12 @@
 use tauri::State;
 use uuid::Uuid;
 
-use crate::domain::channel::Channel;
+use crate::domain::channel::{Channel, ChannelRepository};
+use crate::infrastructure::providers::adaptor_for;
 use crate::infrastructure::sqlite::channel::SqliteChannelRepository;
 use crate::usecases::channel::{
-    ChannelInput, CreateChannelUsecase, DeleteChannelUsecase, ListChannelsUsecase,
-    SetChannelEnabledUsecase, UpdateChannelUsecase,
+    ChannelInput, ChannelTestResult, CreateChannelUsecase, DeleteChannelUsecase,
+    ListChannelsUsecase, SetChannelEnabledUsecase, TestChannelUsecase, UpdateChannelUsecase,
 };
 
 /// 列出全部渠道（按优先级升序；上游密钥遮蔽）。
@@ -80,6 +81,26 @@ pub async fn set_channel_enabled(
         .await
         .map_err(|e| e.to_string())?;
     Ok(mask_api_key(channel))
+}
+
+/// 渠道连通性测试：按 id 取渠道解析适配器，调用上游模型列表接口并持久化结果。
+/// 适配器解析用「当前已存的渠道类型」，用例内部重新取最新渠道执行，回显测试结果。
+#[tauri::command]
+pub async fn test_channel(
+    repo: State<'_, SqliteChannelRepository>,
+    id: String,
+) -> Result<ChannelTestResult, String> {
+    let id = Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    let channel = repo
+        .find_by_id(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "channel not found".to_string())?;
+    let adaptor = adaptor_for(channel.channel_type);
+    TestChannelUsecase
+        .execute(&*repo, id, &*adaptor)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 遮蔽上游密钥：返回给前端的渠道不携带 `api_key`。

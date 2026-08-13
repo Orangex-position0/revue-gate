@@ -11,6 +11,10 @@ use uuid::Uuid;
 use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
 use crate::domain::error::RepositoryError;
+use crate::domain::provider::{
+    BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
+    TestResult,
+};
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
 
 /// 构造一条最小 Channel 测试样本（供各层测试复用）。
@@ -191,6 +195,78 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
 
     async fn list(&self) -> Result<Vec<RequestLog>, RepositoryError> {
         Ok(self.logs.read().unwrap().clone())
+    }
+}
+
+/// 内存版 ProviderAdaptor：`test()` 返回预设结果（成功 / 失败 / 配置错误），供 test_channel 用例测试。
+/// `forward` / `forward_stream` 不参与 test-channel 编排，返回配置错误占位。
+pub struct MockProviderAdaptor {
+    result: TestResult,
+    /// Some → `test()` 返回配置错误（模拟缺 api_key / base_url）。
+    error: Option<String>,
+}
+
+impl MockProviderAdaptor {
+    /// 预设一次成功的连通性测试结果。
+    pub fn new(result: TestResult) -> Self {
+        Self {
+            result,
+            error: None,
+        }
+    }
+
+    /// 预设 `test()` 返回配置错误（如「api key is required」）。
+    pub fn not_configured(reason: &str) -> Self {
+        Self {
+            result: TestResult {
+                ok: false,
+                latency_ms: 0,
+                error: None,
+            },
+            error: Some(reason.to_string()),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderAdaptor for MockProviderAdaptor {
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::OpenAi
+    }
+
+    fn default_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn default_base_url(&self) -> Option<&'static str> {
+        None
+    }
+
+    async fn test(&self, _channel: &Channel) -> Result<TestResult, ProviderError> {
+        match &self.error {
+            Some(reason) => Err(ProviderError::NotConfigured(reason.clone())),
+            None => Ok(self.result.clone()),
+        }
+    }
+
+    async fn forward(
+        &self,
+        _channel: &Channel,
+        _request: &ChatRequest,
+    ) -> Result<ProviderResponse, ProviderError> {
+        Err(ProviderError::NotConfigured(
+            "forward not used in test-channel".into(),
+        ))
+    }
+
+    async fn forward_stream(
+        &self,
+        _channel: &Channel,
+        _request: &ChatRequest,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::NotConfigured(
+            "forward_stream not used in test-channel".into(),
+        ))
     }
 }
 

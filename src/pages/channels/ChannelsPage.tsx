@@ -1,7 +1,7 @@
-// 渠道管理页：渠道列表 + CRUD / 启停（ticket 04）。
+// 渠道管理页：渠道列表 + CRUD / 启停 / 连通性测试（ticket 04 / 06）。
 // 数据本地 useState + load()，CRUD 后就地刷新（见 Architecture-frontend.md「业务数据不进 store」）。
 import { useCallback, useEffect, useState } from "react";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Activity, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { ChannelForm } from "./ChannelForm";
 import { CHANNEL_TYPE_LABELS } from "@/lib/constants";
 import { channelApi, invokeErrorMessage } from "@/lib/api";
@@ -12,11 +12,18 @@ type FormState = { channel: Channel | null } | null;
 
 const cellCls = "px-3 py-2 align-middle text-sm";
 
+/** 测试时间显示为本地时区短格式（后端存 UTC ISO-8601）。 */
+function formatTestTime(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
 export function ChannelsPage() {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
+  /** 正在测试的渠道 id；非 null 时禁用该行测试按钮。 */
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -49,6 +56,23 @@ export function ChannelsPage() {
       );
     } catch (error) {
       window.alert(invokeErrorMessage(error));
+    }
+  }
+
+  /** 连通性测试：调 test_channel 回显延迟 / 错误，重拉列表刷新 lastTest*。 */
+  async function handleTest(channel: Channel) {
+    setTestingId(channel.id);
+    try {
+      const result = await channelApi.test(channel.id);
+      const message = result.ok
+        ? `测试成功：${result.latencyMs}ms`
+        : `测试失败：${result.error ?? "未知原因"}`;
+      window.alert(message);
+      void load();
+    } catch (error) {
+      window.alert(invokeErrorMessage(error));
+    } finally {
+      setTestingId(null);
     }
   }
 
@@ -94,6 +118,7 @@ export function ChannelsPage() {
               <th className="px-3 py-2">模型</th>
               <th className="px-3 py-2">优先级</th>
               <th className="px-3 py-2">权重</th>
+              <th className="px-3 py-2">最近测试</th>
               <th className="px-3 py-2">状态</th>
               <th className="px-3 py-2 text-right">操作</th>
             </tr>
@@ -101,13 +126,13 @@ export function ChannelsPage() {
           <tbody className="divide-y divide-border">
             {loading ? (
               <tr>
-                <td className={cellCls} colSpan={8}>
+                <td className={cellCls} colSpan={9}>
                   加载中…
                 </td>
               </tr>
             ) : channels.length === 0 ? (
               <tr>
-                <td className={cellCls} colSpan={8}>
+                <td className={cellCls} colSpan={9}>
                   暂无渠道，点击右上角「新建渠道」创建。
                 </td>
               </tr>
@@ -135,6 +160,23 @@ export function ChannelsPage() {
                   <td className={cellCls}>{channel.priority}</td>
                   <td className={cellCls}>{channel.weight}</td>
                   <td className={cellCls}>
+                    {channel.lastTestAt ? (
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <span
+                          className={`inline-block h-1.5 w-1.5 rounded-full ${
+                            channel.lastTestOk ? "bg-success" : "bg-danger"
+                          }`}
+                          aria-hidden
+                        />
+                        {formatTestTime(channel.lastTestAt)}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        未测试
+                      </span>
+                    )}
+                  </td>
+                  <td className={cellCls}>
                     <button
                       type="button"
                       onClick={() => void handleToggle(channel)}
@@ -153,6 +195,20 @@ export function ChannelsPage() {
                   </td>
                   <td className={`${cellCls} text-right`}>
                     <div className="flex justify-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleTest(channel)}
+                        disabled={testingId === channel.id}
+                        aria-label={`测试 ${channel.name}`}
+                        title="连通性测试"
+                        className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                      >
+                        {testingId === channel.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Activity className="h-4 w-4" />
+                        )}
+                      </button>
                       <button
                         type="button"
                         onClick={() => setForm({ channel })}

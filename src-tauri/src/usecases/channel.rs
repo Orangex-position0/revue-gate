@@ -5,12 +5,13 @@
 //! （红线段：上游密钥不落库明文暴露给下游，控制面返回前遮蔽，见 interface/commands/channel.rs）。
 //! 调度规则（禁用渠道不参与调度等）在阶段 07 生效，本票只保证字段正确持久化。
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType, ModelMapping};
 use crate::domain::error::RepositoryError;
+use crate::domain::provider::ProviderAdaptor;
 
 /// 渠道管理用例层错误。
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +136,51 @@ impl SetChannelEnabledUsecase {
         channel.updated_at = Utc::now();
         repo.save(&channel).await?;
         Ok(channel)
+    }
+}
+
+/// 渠道连通性测试结果：回显给前端 + 持久化到渠道的 `last_test_*` 字段。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelTestResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub tested_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+/// 渠道连通性测试：调用适配器 `test()`，把结果持久化到渠道的 `last_test_*` 并回显。
+/// 适配器配置错误（缺 api_key / base_url）同样记为失败结果，不抛用例错误
+/// （这样前端能看到「未配置」的失败原因，且结果可持久化）。
+pub struct TestChannelUsecase;
+impl TestChannelUsecase {
+    pub async fn execute(
+        &self,
+        repo: &dyn ChannelRepository,
+        id: Uuid,
+        adaptor: &dyn ProviderAdaptor,
+    ) -> Result<ChannelTestResult, ChannelError> {
+        let mut channel = repo.find_by_id(id).await?.ok_or(ChannelError::NotFound)?;
+        let tested_at = Utc::now();
+        let result = match adaptor.test(&channel).await {
+            Ok(tr) => ChannelTestResult {
+                ok: tr.ok,
+                latency_ms: tr.latency_ms,
+                tested_at,
+                error: tr.error,
+            },
+            Err(e) => ChannelTestResult {
+                ok: false,
+                latency_ms: 0,
+                tested_at,
+                error: Some(e.to_string()),
+            },
+        };
+        channel.last_test_at = Some(tested_at);
+        channel.last_test_ok = Some(result.ok);
+        channel.updated_at = tested_at;
+        repo.save(&channel).await?;
+        Ok(result)
     }
 }
 
@@ -375,5 +421,117 @@ mod tests {
 
         let all = ListChannelsUsecase.execute(&repo).await.expect("list");
         assert_eq!(all.len(), 2);
+    }
+
+    use crate::test_support::MockProviderAdaptor;
+
+    /// 连通性测试：成功结果回显并持久化为 last_test_ok=true。
+    #[tokio::test]
+    async fn test_channel_persists_success_result() {
+        let repo = InMemoryChannelRepository::new();
+        let created = CreateChannelUsecase
+            .execute(&repo, input("openai-prod"))
+            .await
+            .expect("create");
+        let adaptor = MockProviderAdaptor::new(crate::domain::provider::TestResult {
+            ok: true,
+            latency_ms: 42,
+            error: None,
+        });
+
+        let result = TestChannelUsecase
+            .execute(&repo, created.id, &adaptor)
+            .await
+            .expect("test channel");
+        assert!(result.ok);
+        assert_eq!(result.latency_ms, 42);
+        assert_eq!(result.error, None);
+
+        let saved = repo
+            .find_by_id(created.id)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(saved.last_test_ok, Some(true));
+        assert_eq!(saved.last_test_at, Some(result.tested_at));
+    }
+
+    /// 连通性测试：失败结果回显错误原因并持久化为 last_test_ok=false。
+    #[tokio::test]
+    async fn test_channel_persists_failure_and_echoes_error() {
+        let repo = InMemoryChannelRepository::new();
+        let created = CreateChannelUsecase
+            .execute(&repo, input("openai-prod"))
+            .await
+            .expect("create");
+        let adaptor = MockProviderAdaptor::new(crate::domain::provider::TestResult {
+            ok: false,
+            latency_ms: 12,
+            error: Some("upstream responded 401".into()),
+        });
+
+        let result = TestChannelUsecase
+            .execute(&repo, created.id, &adaptor)
+            .await
+            .expect("test channel");
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some("upstream responded 401"));
+
+        let saved = repo
+            .find_by_id(created.id)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(saved.last_test_ok, Some(false));
+        assert_eq!(saved.last_test_at, Some(result.tested_at));
+    }
+
+    /// 连通性测试：适配器配置错误（缺 api_key）同样记为失败结果并回显，不抛用例错误。
+    #[tokio::test]
+    async fn test_channel_records_config_error_as_failure() {
+        let repo = InMemoryChannelRepository::new();
+        let created = CreateChannelUsecase
+            .execute(&repo, input("openai-prod"))
+            .await
+            .expect("create");
+        let adaptor = MockProviderAdaptor::not_configured("api key is required");
+
+        let result = TestChannelUsecase
+            .execute(&repo, created.id, &adaptor)
+            .await
+            .expect("config error mapped to failure result");
+        assert!(!result.ok);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("api key is required"),
+            "配置错误原因应回显（含 ProviderError Display 前缀）"
+        );
+
+        let saved = repo
+            .find_by_id(created.id)
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(saved.last_test_ok, Some(false));
+    }
+
+    /// 连通性测试：未知 id 返回 NotFound，不产生持久化副作用。
+    #[tokio::test]
+    async fn test_channel_unknown_id_errors_not_found() {
+        let repo = InMemoryChannelRepository::new();
+        let adaptor = MockProviderAdaptor::new(crate::domain::provider::TestResult {
+            ok: true,
+            latency_ms: 1,
+            error: None,
+        });
+        assert!(matches!(
+            TestChannelUsecase
+                .execute(&repo, Uuid::now_v7(), &adaptor)
+                .await,
+            Err(ChannelError::NotFound)
+        ));
     }
 }

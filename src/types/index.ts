@@ -38,6 +38,14 @@ export interface Channel extends ChannelInput {
   updatedAt: string;
 }
 
+/** 渠道连通性测试结果：由 test_channel 命令返回，并已持久化到渠道 lastTestAt / lastTestOk。 */
+export interface ChannelTestResult {
+  ok: boolean;
+  latencyMs: number;
+  testedAt: string;
+  error: string | null;
+}
+
 /** 配额值对象：limit 为上限（null = 无上限），used 为已用额度。与后端 Quota 对齐。 */
 export interface Quota {
   limit: number | null;

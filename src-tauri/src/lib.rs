@@ -13,7 +13,8 @@ use interface::commands::api_key::{
     create_api_key, delete_api_key, list_api_keys, set_api_key_enabled, update_api_key,
 };
 use interface::commands::channel::{
-    create_channel, delete_channel, list_channels, set_channel_enabled, update_channel,
+    create_channel, delete_channel, list_channels, set_channel_enabled, test_channel,
+    update_channel,
 };
 use interface::commands::server::{
     DEFAULT_HOST, DEFAULT_PORT, ServerStatus, get_server_status, start_server, stop_server,
@@ -40,6 +41,7 @@ pub fn run() {
             update_channel,
             delete_channel,
             set_channel_enabled,
+            test_channel,
             list_api_keys,
             create_api_key,
             update_api_key,

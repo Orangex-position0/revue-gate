@@ -5,6 +5,7 @@ import type {
   ApiKeyInput,
   Channel,
   ChannelInput,
+  ChannelTestResult,
   ServerStatus,
 } from "@/types";
 
@@ -31,6 +32,8 @@ export const channelApi = {
   /** 启停渠道并返回（状态正确持久化）。 */
   setEnabled: (id: string, enabled: boolean) =>
     invoke<Channel>("set_channel_enabled", { id, enabled }),
+  /** 渠道连通性测试：调用上游模型列表端点，返回结果并落库（lastTestAt / lastTestOk）。 */
+  test: (id: string) => invoke<ChannelTestResult>("test_channel", { id }),
 };
 
 export const apiKeyApi = {
