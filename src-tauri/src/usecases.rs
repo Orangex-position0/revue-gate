@@ -3,4 +3,6 @@
 //! 依赖方向 `interface → usecases → domain`；仓储经 trait 注入（seam A 测试可 mock）。
 //! 命名约定：动词 + `Usecase` 后缀（如 `CreateChannelUsecase`）。
 
+pub mod api_key;
+pub mod auth;
 pub mod channel;

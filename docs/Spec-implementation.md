@@ -82,7 +82,7 @@ revue-gate 的设计文档已齐备（需求、路线图、前后端架构），
 4. **数据面契约**：`POST /v1/chat/completions`、`GET /v1/models`（启用渠道模型合并去重，不按密钥过滤，禁用渠道剔除）、`GET /health`；Bearer 认证；SSE 流式透传。认证失败 `401`，配额超限 `429`。
 5. **调度与重试**：按模型筛选候选 → 优先级排序 → 应用模型映射 → 转发 → 解析 usage → 记账 → 写日志；失败按候选渠道顺序重试（≤ 候选渠道数）。
 6. **供应商适配器**：OpenAI / DeepSeek / Custom 走 OpenAI-compatible 直通；Claude / Gemini 协议转换，转换逻辑限定在 infrastructure 的适配器内。`test()` 用各自模型列表端点。
-7. **密钥格式**：`sk-revue-<16 位随机 hex>`（26 字符，8 字节熵）；上游密钥永不落库明文暴露给下游。
+7. **密钥格式**：`sk-revue-<16 位随机 hex>`（25 字符，8 字节熵）；上游密钥永不落库明文暴露给下游。
 8. **ID 与时间**：uuid v7（时间有序主键）；chrono `DateTime<Utc>`，审计时间一律 UTC 存储。
 9. **错误处理**：domain / usecases 用 thiserror 错误枚举；interface / main 用 anyhow 收尾。
 10. **存储**：SQLite 只存业务数据，`sqlx::migrate!` 内嵌迁移；应用设置存 tauri-plugin-store 的 settings.json。

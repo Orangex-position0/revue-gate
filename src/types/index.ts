@@ -37,3 +37,27 @@ export interface Channel extends ChannelInput {
   createdAt: string;
   updatedAt: string;
 }
+
+/** 配额值对象：limit 为上限（null = 无上限），used 为已用额度。与后端 Quota 对齐。 */
+export interface Quota {
+  limit: number | null;
+  used: number;
+}
+
+/** 创建 / 编辑密钥入参（create 与 update 共用；密钥本身不可由入参指定）。 */
+export interface ApiKeyInput {
+  name: string;
+  quotaLimit: number | null;
+  enabled: boolean;
+}
+
+/** 密钥实体：Command 返回。key 仅在 create 时携带明文，其余路径已被后端遮蔽为占位符。 */
+export interface ApiKey {
+  id: string;
+  name: string;
+  key: string;
+  enabled: boolean;
+  quota: Quota;
+  createdAt: string;
+  updatedAt: string;
+}

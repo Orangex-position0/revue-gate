@@ -1,16 +1,22 @@
 //! ApiKey 聚合根：实体 + 配额值对象 + ApiKeyRepository trait。
 //!
-//! 密钥格式 `sk-revue-<16 位随机 hex>`（26 字符、8 字节熵），HTTP 请求以
-//! `Authorization: Bearer <key>` 认证。配额策略（QuotaPolicy 领域服务）随阶段 05 加入。
+//! 密钥格式 `sk-revue-<16 位随机 hex>`（25 字符、8 字节熵），HTTP 请求以
+//! `Authorization: Bearer <key>` 认证。配额超限判定由领域服务 `QuotaPolicy`
+//! （见 domain/quota.rs）负责，本文件只定义配额数据形态。
+//!
+//! serde 派生态用于跨 Tauri Command 边界序列化（前端类型见 `src/types/index.ts`）：
+//! 字段输出 camelCase。
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
 
 /// 配额值对象：`limit` 为上限（None 表示无上限），`used` 为已用额度。
-/// `quota_used >= quota_limit` 时请求应返回 429（判定逻辑在阶段 05）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `quota_used >= quota_limit` 时请求应返回 429（判定见 domain/quota.rs 的 QuotaPolicy）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Quota {
     /// 配额上限；None 表示不限制。
     pub limit: Option<u64>,
@@ -19,7 +25,9 @@ pub struct Quota {
 }
 
 /// ApiKey 实体：一条网关本地密钥，下游用其访问网关、不接触上游密钥。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `key` 明文仅本地存储：控制面创建命令返回一次，列表/编辑/启停返回遮蔽预览。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiKey {
     pub id: Uuid,
     /// 管理员可读名称。

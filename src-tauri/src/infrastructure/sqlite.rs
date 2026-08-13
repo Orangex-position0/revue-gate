@@ -1,6 +1,7 @@
 //! 基础设施层 SQLite 模块入口：连接池初始化 + 内嵌迁移（sqlite.rs 承载入口，
 //! 各仓储实现落地于 sqlite/ 子目录，遵循 2024 Edition `foo.rs` 模块布局）。
 
+pub mod api_key;
 pub mod channel;
 
 use std::str::FromStr;

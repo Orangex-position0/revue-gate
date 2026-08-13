@@ -3200,6 +3200,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sqlx",

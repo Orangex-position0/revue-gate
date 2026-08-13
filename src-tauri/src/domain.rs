@@ -6,4 +6,5 @@
 pub mod api_key;
 pub mod channel;
 pub mod error;
+pub mod quota;
 pub mod request_log;

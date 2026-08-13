@@ -8,7 +8,7 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::domain::api_key::{ApiKey, ApiKeyRepository};
+use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
 use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
@@ -82,6 +82,25 @@ impl ChannelRepository for InMemoryChannelRepository {
     }
 }
 
+/// 构造一条最小 ApiKey 测试样本（供各层测试复用）。
+/// key 由随机 uuid v4 派生（全随机 32 hex，取前 16 位），保证每次调用唯一
+/// （api_keys.key 列 UNIQUE）。不用 v7：其前 12 位 hex 为毫秒时间戳，同毫秒调用会碰撞。
+pub(crate) fn sample_api_key() -> ApiKey {
+    let hex: String = Uuid::new_v4().simple().to_string()[..16].to_string();
+    ApiKey {
+        id: Uuid::now_v7(),
+        name: "client".to_string(),
+        key: format!("sk-revue-{hex}"),
+        enabled: true,
+        quota: Quota {
+            limit: None,
+            used: 0,
+        },
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 /// 内存版 ApiKeyRepository：以 Vec<ApiKey> 为后端，upsert 语义的 save。
 #[derive(Default)]
 pub struct InMemoryApiKeyRepository {
@@ -131,7 +150,12 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     }
 
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
-        self.api_keys.write().unwrap().retain(|k| k.id != id);
+        let mut guard = self.api_keys.write().unwrap();
+        let before = guard.len();
+        guard.retain(|k| k.id != id);
+        if guard.len() == before {
+            return Err(RepositoryError::NotFound);
+        }
         Ok(())
     }
 }

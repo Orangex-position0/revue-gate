@@ -7,7 +7,11 @@ pub mod interface;
 mod test_support;
 pub mod usecases;
 
+use infrastructure::sqlite::api_key::SqliteApiKeyRepository;
 use infrastructure::sqlite::channel::SqliteChannelRepository;
+use interface::commands::api_key::{
+    create_api_key, delete_api_key, list_api_keys, set_api_key_enabled, update_api_key,
+};
 use interface::commands::channel::{
     create_channel, delete_channel, list_channels, set_channel_enabled, update_channel,
 };
@@ -35,7 +39,12 @@ pub fn run() {
             create_channel,
             update_channel,
             delete_channel,
-            set_channel_enabled
+            set_channel_enabled,
+            list_api_keys,
+            create_api_key,
+            update_api_key,
+            delete_api_key,
+            set_api_key_enabled
         ])
         .setup(|app| {
             // 1) SQLite 连接池 + 内嵌迁移：失败即启动失败（业务数据层不可用则无意义运行）。
@@ -48,8 +57,9 @@ pub fn run() {
             let pool = tauri::async_runtime::block_on(infrastructure::sqlite::init_pool(db_path))?;
             app.manage(pool.clone());
 
-            // 1b) 渠道仓储入 state（命令层经 tauri::State 访问；后续密钥/日志仓储同款接入）。
-            app.manage(SqliteChannelRepository::new(pool));
+            // 1b) 渠道/密钥仓储入 state（命令层经 tauri::State 访问）。
+            app.manage(SqliteChannelRepository::new(pool.clone()));
+            app.manage(SqliteApiKeyRepository::new(pool));
 
             // 2) 服务管理器入 state（命令层经 tauri::State 访问）。
             let server = ServerManager::new();
