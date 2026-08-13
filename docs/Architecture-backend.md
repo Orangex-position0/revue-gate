@@ -46,6 +46,7 @@ infrastructure (基础设施层)   实现仓储接口 + 供应商适配器
 src-tauri/src/
 ├── main.rs                  # 二进制入口
 ├── lib.rs                   # 库入口：Tauri Builder + 依赖组装 + 启动 HTTP
+├── domain.rs                #   domain 模块入口（pub mod channel / api_key / ...）
 ├── domain/                  # 领域层：纯业务规则，零技术依赖
 │   ├── channel.rs           #   Channel 聚合根：实体 + 模型映射/优先级值对象 + ChannelRepository trait
 │   ├── api_key.rs           #   ApiKey 聚合根：实体 + 配额值对象 + ApiKeyRepository trait
@@ -53,6 +54,7 @@ src-tauri/src/
 │   ├── provider.rs          #   ProviderAdaptor trait（供应商适配器接口）
 │   ├── dispatcher.rs        #   领域服务：渠道选择策略（按模型筛选 → 优先级排序）
 │   └── quota.rs             #   领域服务：配额策略（QuotaPolicy）
+├── usecases.rs              #   usecases 模块入口
 ├── usecases/                # 用例层：编排 domain + 调仓储，组织数据流
 │   ├── proxy.rs             #   转发用例（认证→选渠道→映射→转发→记账→日志）
 │   ├── auth.rs              #   认证用例
@@ -61,14 +63,25 @@ src-tauri/src/
 │   ├── log.rs               #   日志查询用例
 │   ├── stats.rs             #   统计用例
 │   └── settings.rs          #   设置用例
+├── infrastructure.rs        #   infrastructure 模块入口
 ├── infrastructure/          # 基础设施层：技术实现
-│   ├── sqlite/              #   sqlx 仓储实现（ChannelRepository 等）
+│   ├── sqlite.rs            #   sqlx 连接池 + 内嵌迁移（仓储实现落地后升级为 sqlite.rs + sqlite/）
+│   ├── providers.rs         #   providers 模块入口
 │   └── providers/           #   供应商适配器实现（openai / claude / gemini / deepseek / custom）
+├── interface.rs             #   interface 模块入口（pub mod http / commands）
 ├── interface/               # 入口层
-│   ├── http/                #   Axum 网关（数据面）：router + handlers
+│   ├── http.rs              #   http 模块入口（pub mod router / server）
+│   ├── http/                #   Axum 网关（数据面）
+│   │   ├── router.rs        #     路由树 + /health
+│   │   ├── server.rs        #     服务生命周期（start/stop + 优雅停机）
+│   │   └── handlers.rs      #     /v1/* 请求处理器（阶段 05/08/09）
+│   ├── commands.rs          #   commands 模块入口（pub mod server）
 │   └── commands/            #   Tauri 控制面
+│       ├── server.rs        #     服务生命周期命令 + 状态事件
+│       └── ...              #     渠道/密钥/日志/统计命令（阶段 03+）
+├── utils.rs                 #   utils 模块入口
 ├── utils/                   # 通用小工具（如 hex 编码；ID 用 uuid crate，时间用 chrono，不自研）
-└── migrations/              # sqlx 内嵌迁移
+└── migrations/              # sqlx 内嵌迁移（非 Rust 模块，无需入口文件）
     ├── 001_init.sql         #   建表：channels / api_keys / request_logs / settings 相关
     ├── 002_add_model_mapping.sql
     └── ...
