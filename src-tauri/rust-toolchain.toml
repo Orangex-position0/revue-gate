@@ -1,0 +1,5 @@
+# 固定工具链：stable + rustfmt/clippy 组件，保证本地与未来 CI 同版本
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
