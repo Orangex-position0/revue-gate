@@ -1,0 +1,66 @@
+# revue-gate 托管 hooks：Rust（src-tauri）+ 前端（React+TS）共用 prek 一套
+# 注册：prek install（仓库根执行）；pre-commit 按变更文件过滤，pre-push 全量门禁
+default_install_hook_types = ["pre-commit", "pre-push"]
+
+[[repos]]
+repo = "local"
+
+# ---- Rust（crate 位于 src-tauri/，用 --manifest-path 指回，不依赖 hook 工作目录）----
+# 注：未加 cargo-todo hook——它不支持 --manifest-path 且 prek 无 per-hook cwd，无法指向嵌套 crate；
+# TODO/unimplemented 占位已由 Cargo.toml [lints.clippy] 的 todo = "deny" 兜底
+
+[[repos.hooks]]
+id = "fmt"
+name = "cargo fmt"
+language = "system"
+entry = "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check"
+files = "(\\.rs$|(^|/)Cargo\\.(toml|lock)$)"
+pass_filenames = false
+stages = ["pre-commit"]
+
+[[repos.hooks]]
+id = "check"
+name = "cargo check"
+language = "system"
+entry = "cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features"
+files = "(\\.rs$|(^|/)Cargo\\.(toml|lock)$)"
+pass_filenames = false
+stages = ["pre-commit"]
+
+[[repos.hooks]]
+id = "clippy"
+name = "cargo clippy"
+language = "system"
+entry = "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+[[repos.hooks]]
+id = "test"
+name = "cargo nextest"
+language = "system"
+entry = "cargo nextest run --locked --manifest-path src-tauri/Cargo.toml --no-tests=pass"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
+
+# ---- 前端（React + TS，仓库根）----
+
+[[repos.hooks]]
+id = "tsc"
+name = "tsc --noEmit"
+language = "system"
+entry = "pnpm exec tsc"
+files = "(\\.[cm]?tsx?$|(^|/)package\\.json$|(^|/)tsconfig.*\\.json$)"
+pass_filenames = false
+stages = ["pre-commit"]
+
+[[repos.hooks]]
+id = "frontend-build"
+name = "pnpm build"
+language = "system"
+entry = "pnpm build"
+pass_filenames = false
+always_run = true
+stages = ["pre-push"]
