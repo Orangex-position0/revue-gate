@@ -74,6 +74,9 @@ mod tests {
                     error: None,
                 }))
             }),
+            Arc::new(std::sync::RwLock::new(
+                crate::domain::settings::GatewaySettings::default(),
+            )),
         );
         AppState {
             proxy: Arc::new(usecase),

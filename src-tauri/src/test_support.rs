@@ -17,6 +17,7 @@ use crate::domain::provider::{
     TestResult,
 };
 use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
+use crate::domain::settings::{GatewaySettings, SettingsRepository};
 
 /// 构造一条最小 Channel 测试样本（供各层测试复用）。
 pub(crate) fn sample_channel() -> Channel {
@@ -277,6 +278,31 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
     }
 }
 
+/// 内存版 SettingsRepository：以 `Option<GatewaySettings>` 为后端。
+/// `load` 无值时返回默认设置（与 sqlx 实现在文件缺失时的行为一致）；`save` 覆盖存储。
+#[derive(Default)]
+pub struct InMemorySettingsRepository {
+    settings: RwLock<Option<GatewaySettings>>,
+}
+
+impl InMemorySettingsRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl SettingsRepository for InMemorySettingsRepository {
+    async fn load(&self) -> Result<GatewaySettings, RepositoryError> {
+        Ok(self.settings.read().unwrap().clone().unwrap_or_default())
+    }
+
+    async fn save(&self, settings: &GatewaySettings) -> Result<(), RepositoryError> {
+        *self.settings.write().unwrap() = Some(settings.clone());
+        Ok(())
+    }
+}
+
 /// 取仓储当前全部日志：`RequestLogRepository::list()` 已移除（无界读取），
 /// 测试需要全量断言时改经 `query` 全量分页（LIMIT 拉满，语义等价）。
 pub(crate) async fn all_request_logs(repo: &dyn RequestLogRepository) -> Vec<RequestLog> {
@@ -523,5 +549,28 @@ mod tests {
             Some(log)
         );
         assert_eq!(all_request_logs(&*repo).await.len(), 1);
+    }
+
+    /// seam A 验证：内存 SettingsRepository 可被引用为 trait object；无值返回默认、保存后可回读。
+    #[tokio::test]
+    async fn settings_repository_mock_is_referenceable_as_trait_object() {
+        let repo: Box<dyn SettingsRepository> = Box::new(InMemorySettingsRepository::new());
+        assert_eq!(
+            repo.load().await.expect("load"),
+            GatewaySettings::default(),
+            "无持久化值时返回默认设置"
+        );
+
+        let settings = GatewaySettings {
+            port: 8080,
+            autostart: true,
+            ..GatewaySettings::default()
+        };
+        repo.save(&settings).await.expect("save");
+        assert_eq!(
+            repo.load().await.expect("load after save"),
+            settings,
+            "保存后可完整回读"
+        );
     }
 }

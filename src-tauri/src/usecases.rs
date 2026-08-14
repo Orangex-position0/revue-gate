@@ -9,4 +9,5 @@ pub mod channel;
 pub mod log;
 pub mod models;
 pub mod proxy;
+pub mod settings;
 pub mod stats;

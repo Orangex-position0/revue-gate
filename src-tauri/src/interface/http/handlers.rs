@@ -251,6 +251,7 @@ mod tests {
     use super::*;
     use crate::domain::api_key::{ApiKeyRepository, Quota};
     use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
+    use crate::domain::settings::GatewaySettings;
     use crate::infrastructure::providers::adaptor_for;
     use crate::infrastructure::providers::test_util;
     use crate::infrastructure::sqlite::api_key::SqliteApiKeyRepository;
@@ -304,6 +305,7 @@ mod tests {
             Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
             Arc::clone(&h.log_repo) as Arc<dyn crate::domain::request_log::RequestLogRepository>,
             Box::new(|c: &Channel| adaptor_for(c.channel_type)),
+            Arc::new(std::sync::RwLock::new(GatewaySettings::default())),
         );
         let state = AppState {
             proxy: Arc::new(usecase),

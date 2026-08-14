@@ -153,3 +153,24 @@ export interface StatsSnapshot {
   /** 最近 7 天（含今日，旧→新）按本地日聚合。 */
   trend: DailyStat[];
 }
+
+/** 界面主题三态：与后端 Theme 枚举 lowercase 序列化一致。 */
+export type Theme = "light" | "dark" | "system";
+
+/** 失败重试策略：enabled 开关；max_retries = 首次之后的额外尝试次数（null = 无上限）。
+ *  字段为 snake_case：后端 RetryPolicy 无 rename_all，仅 GatewaySettings 整体 camelCase。 */
+export interface RetryPolicy {
+  enabled: boolean;
+  max_retries: number | null;
+}
+
+/** 网关设置快照：与后端 GatewaySettings serde camelCase 对齐；port 0 = 随机端口。 */
+export interface GatewaySettings {
+  host: string;
+  port: number;
+  theme: Theme;
+  minimizeToTray: boolean;
+  closeToTray: boolean;
+  autostart: boolean;
+  retry: RetryPolicy;
+}

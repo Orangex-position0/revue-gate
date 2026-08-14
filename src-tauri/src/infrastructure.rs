@@ -5,3 +5,4 @@
 
 pub mod providers;
 pub mod sqlite;
+pub mod store;

@@ -11,7 +11,7 @@
 //!
 //! 记账 / 日志写入为尽力而为：上游已成功处理时，记账失败不应让客户端收到 5xx 而重复计费。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use chrono::Utc;
@@ -27,6 +27,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
+use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
 
@@ -118,6 +119,8 @@ pub struct ProxyRequestUsecase {
     channel_repo: Arc<dyn ChannelRepository>,
     log_repo: Arc<dyn RequestLogRepository>,
     adaptor: AdaptorResolver,
+    /// 共享网关设置：execute 时读取重试策略（保存设置后即时生效，无需重建用例）。
+    settings: Arc<RwLock<GatewaySettings>>,
 }
 
 impl ProxyRequestUsecase {
@@ -126,12 +129,14 @@ impl ProxyRequestUsecase {
         channel_repo: Arc<dyn ChannelRepository>,
         log_repo: Arc<dyn RequestLogRepository>,
         adaptor: AdaptorResolver,
+        settings: Arc<RwLock<GatewaySettings>>,
     ) -> Self {
         Self {
             api_key_repo,
             channel_repo,
             log_repo,
             adaptor,
+            settings,
         }
     }
 
@@ -153,12 +158,31 @@ impl ProxyRequestUsecase {
             return Err(ProxyError::NoCandidateChannel(model.to_string()));
         }
 
-        // 3) 逐候选尝试：成功即返回；失败记录日志后尝试下一个（不超过候选渠道数）。
+        // 2b) 重试策略（共享设置，execute 时读取）决定本轮最多尝试次数：
+        //     关闭 → 只试首个候选；开启且不限 → 全部候选（ticket 07 默认行为）；
+        //     开启且限 n → 首个之后最多再试 n 次（总尝试 = n + 1），且不超过候选数。
+        let retry = self
+            .settings
+            .read()
+            .expect("settings lock poisoned")
+            .retry
+            .clone();
+        let max_attempts = if retry.enabled {
+            retry
+                .max_retries
+                .map(|n| (n as usize).saturating_add(1))
+                .unwrap_or(candidates.len())
+        } else {
+            1
+        }
+        .min(candidates.len());
+
+        // 3) 逐候选尝试：成功即返回；失败记录日志后尝试下一个（不超过 max_attempts）。
         let mut attempts = 0usize;
         let mut last_status: Option<u16> = None;
         let mut last_error = String::new();
 
-        for channel in &candidates {
+        for channel in candidates.iter().take(max_attempts) {
             attempts += 1;
             let upstream_model = apply_mapping(channel, model);
             let mut body = request.body.clone();
@@ -431,6 +455,7 @@ mod tests {
     use super::*;
     use crate::domain::channel::ModelMapping;
     use crate::domain::provider::Usage;
+    use crate::domain::settings::RetryPolicy;
     use crate::test_support::{
         InMemoryApiKeyRepository, InMemoryChannelRepository, InMemoryRequestLogRepository,
         MockForwardAdaptor, all_request_logs, sample_api_key, sample_channel,
@@ -487,9 +512,10 @@ mod tests {
         }
     }
 
-    /// 组装用例 + 共享仓储（测试侧持 Arc 事后断言日志 / 配额）。
-    fn harness(
+    /// 组装用例 + 共享仓储 + 指定重试策略的共享设置（测试侧持 Arc 事后断言日志 / 配额）。
+    fn harness_with_retry(
         adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
+        retry: RetryPolicy,
     ) -> (
         ProxyRequestUsecase,
         Arc<InMemoryApiKeyRepository>,
@@ -499,13 +525,30 @@ mod tests {
         let keys = Arc::new(InMemoryApiKeyRepository::new());
         let channels = Arc::new(InMemoryChannelRepository::new());
         let logs = Arc::new(InMemoryRequestLogRepository::new());
+        let settings = Arc::new(RwLock::new(GatewaySettings {
+            retry,
+            ..GatewaySettings::default()
+        }));
         let uc = ProxyRequestUsecase::new(
             Arc::clone(&keys) as Arc<dyn ApiKeyRepository>,
             Arc::clone(&channels) as Arc<dyn ChannelRepository>,
             Arc::clone(&logs) as Arc<dyn RequestLogRepository>,
             Box::new(adaptor),
+            settings,
         );
         (uc, keys, channels, logs)
+    }
+
+    /// 默认重试策略（开启、不限）的组装：既有测试语义不变（ticket 07 逐个尝试）。
+    fn harness(
+        adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
+    ) -> (
+        ProxyRequestUsecase,
+        Arc<InMemoryApiKeyRepository>,
+        Arc<InMemoryChannelRepository>,
+        Arc<InMemoryRequestLogRepository>,
+    ) {
+        harness_with_retry(adaptor, RetryPolicy::default())
     }
 
     fn single_ok_adaptor(
@@ -984,5 +1027,125 @@ mod tests {
             saved.quota.used, 5,
             "流中断时已下发的增量 usage 同样累加配额"
         );
+    }
+
+    /// 构造「全部候选固定失败（可重试状态码）」的共享 recorder 适配器：记录每次 forward 调用。
+    fn failing_recorder(
+        recorder: Arc<Mutex<Vec<ChatRequest>>>,
+        status: u16,
+    ) -> impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static {
+        move |_: &Channel| {
+            Box::new(MockForwardAdaptor::with_recorder(
+                Arc::clone(&recorder),
+                Ok(ok_response(status, None)),
+                Ok(vec![]),
+            ))
+        }
+    }
+
+    /// 重试关闭：即使有多个候选也只试首个（全部失败时 attempts=1，无额外转发）。
+    #[tokio::test]
+    async fn retry_disabled_tries_only_first_candidate() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let (uc, keys, channels, _logs) = harness_with_retry(
+            failing_recorder(Arc::clone(&recorder), 500),
+            RetryPolicy {
+                enabled: false,
+                max_retries: None,
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+        save_channel(&channels, "b", &["gpt-4o"], 1).await;
+
+        let err = uc
+            .execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect_err("all failed");
+        assert!(
+            matches!(err, ProxyError::NoChannelAvailable { attempts: 1, .. }),
+            "重试关闭应只试首个候选: {err:?}"
+        );
+        assert_eq!(recorder.lock().unwrap().len(), 1, "只发生一次 forward");
+    }
+
+    /// 重试开启且限次：max_retries=n → 总尝试 n+1（首个 + n 次重试），不越界。
+    #[tokio::test]
+    async fn retry_limit_caps_attempts() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let (uc, keys, channels, _logs) = harness_with_retry(
+            failing_recorder(Arc::clone(&recorder), 429),
+            RetryPolicy {
+                enabled: true,
+                max_retries: Some(1),
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+        save_channel(&channels, "b", &["gpt-4o"], 1).await;
+        save_channel(&channels, "c", &["gpt-4o"], 2).await;
+
+        let err = uc
+            .execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect_err("all failed");
+        assert!(
+            matches!(err, ProxyError::NoChannelAvailable { attempts: 2, .. }),
+            "max_retries=1 应恰好尝试 2 个候选: {err:?}"
+        );
+        assert_eq!(recorder.lock().unwrap().len(), 2, "首个 + 1 次重试");
+    }
+
+    /// 重试限次高于候选数：实际尝试数被候选数封顶（不产生越界 / 空迭代）。
+    #[tokio::test]
+    async fn retry_limit_higher_than_candidates_is_bounded() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let (uc, keys, channels, _logs) = harness_with_retry(
+            failing_recorder(Arc::clone(&recorder), 503),
+            RetryPolicy {
+                enabled: true,
+                max_retries: Some(10),
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+        save_channel(&channels, "b", &["gpt-4o"], 1).await;
+
+        let err = uc
+            .execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect_err("all failed");
+        assert!(
+            matches!(err, ProxyError::NoChannelAvailable { attempts: 2, .. }),
+            "尝试数不应超过候选数: {err:?}"
+        );
+        assert_eq!(recorder.lock().unwrap().len(), 2);
+    }
+
+    /// 重试开启且不限（默认）：逐个尝试全部候选——ticket 07 默认行为不被设置落地破坏。
+    #[tokio::test]
+    async fn retry_unlimited_tries_all_candidates() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let (uc, keys, channels, _logs) = harness_with_retry(
+            failing_recorder(Arc::clone(&recorder), 500),
+            RetryPolicy {
+                enabled: true,
+                max_retries: None,
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+        save_channel(&channels, "b", &["gpt-4o"], 1).await;
+        save_channel(&channels, "c", &["gpt-4o"], 2).await;
+
+        let err = uc
+            .execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect_err("all failed");
+        assert!(
+            matches!(err, ProxyError::NoChannelAvailable { attempts: 3, .. }),
+            "不限重试应尝试全部候选: {err:?}"
+        );
+        assert_eq!(recorder.lock().unwrap().len(), 3);
     }
 }

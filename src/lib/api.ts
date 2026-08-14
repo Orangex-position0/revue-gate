@@ -6,6 +6,7 @@ import type {
   Channel,
   ChannelInput,
   ChannelTestResult,
+  GatewaySettings,
   LogDetail,
   LogPage,
   LogQuery,
@@ -21,6 +22,20 @@ export function invokeErrorMessage(error: unknown): string {
 export const serverApi = {
   /** 查询服务当前运行状态（webview 首挂载校准，常规刷新依赖事件）。 */
   status: () => invoke<ServerStatus>("get_server_status"),
+  /** 启动服务：host/port 省略时读取已保存的共享设置（0 = 随机端口）。
+   *  返回新状态；运行状态以 server-started 事件为准（事件桥接）。 */
+  start: (host?: string, port?: number) =>
+    invoke<ServerStatus>("start_server", { host, port }),
+  /** 停止服务：返回停止后的状态；运行状态以 server-stopped 事件为准。 */
+  stop: () => invoke<ServerStatus>("stop_server"),
+};
+
+export const settingsApi = {
+  /** 读取设置快照（未持久化时返回默认设置）。 */
+  get: () => invoke<GatewaySettings>("get_settings"),
+  /** 整体保存设置快照：校验 → 应用开机自启 → 持久化 → 更新共享设置（即时生效）。 */
+  save: (settings: GatewaySettings) =>
+    invoke<void>("save_settings", { settings }),
 };
 
 export const channelApi = {

@@ -1,7 +1,10 @@
 // 主题三态应用：light / dark / system。
 // system 不写 data-theme，由 CSS 媒体查询（prefers-color-scheme）响应，零 JS 监听。
-// 持久化暂用 localStorage；settings 后端（ticket 12，tauri-plugin-store）落地后迁移到 settingsApi。
-export type Theme = "light" | "dark" | "system";
+// 主题类型归 types/（与后端 Theme 枚举对齐），此处 re-export 保持现有导入路径。
+// 持久化走后端设置（settingsApi，ticket 12）；localStorage 仅作渲染前首帧缓存。
+import type { Theme } from "@/types";
+
+export type { Theme };
 
 export const THEME_STORAGE_KEY = "revue-gate-theme";
 
