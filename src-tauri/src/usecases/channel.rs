@@ -1,9 +1,9 @@
-//! 渠道管理用例：CRUD / 启停编排。
+//! Channel management use cases: CRUD / enable-disable orchestration.
 //!
-//! 无状态用例：仓储以 `&dyn ChannelRepository` 注入，seam A 测试可用内存 mock。
-//! 更新语义：`api_key` 为空表示「保持原值」——编辑表单不预填上游密钥，留空不覆盖
-//! （红线段：上游密钥不落库明文暴露给下游，控制面返回前遮蔽，见 interface/commands/channel.rs）。
-//! 调度规则（禁用渠道不参与调度等）在阶段 07 生效，本票只保证字段正确持久化。
+//! Stateless use cases: repositories are injected as `&dyn ChannelRepository`, seam A tests can use in-memory mocks.
+//! Update semantics: an empty `api_key` means "keep the original value" — the edit form does not prefill the upstream key, and leaving it blank does not overwrite
+//! (red line: upstream keys are never stored as plaintext exposed downstream; the control plane masks them before returning, see interface/commands/channel.rs).
+//! Scheduling rules (e.g. disabled channels are not scheduled) take effect in stage 07; this ticket only guarantees fields are persisted correctly.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use crate::domain::channel::{Channel, ChannelRepository, ChannelType, ModelMappi
 use crate::domain::error::RepositoryError;
 use crate::domain::provider::ProviderAdaptor;
 
-/// 渠道管理用例层错误。
+/// Channel use case layer error.
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
     #[error("channel not found")]
@@ -24,7 +24,7 @@ pub enum ChannelError {
     Repository(#[from] RepositoryError),
 }
 
-/// 创建 / 编辑渠道的入参（create 与 update 共用；update 时 `api_key` 为空 = 保持原值）。
+/// Input for creating / editing a channel (shared by create and update; on update an empty `api_key` = keep the original value).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelInput {
@@ -39,7 +39,7 @@ pub struct ChannelInput {
     pub enabled: bool,
 }
 
-/// 创建渠道：校验入参、生成新实体并保存，返回持久化后的渠道。
+/// Create a channel: validate the input, build a new entity and save it, returning the persisted channel.
 pub struct CreateChannelUsecase;
 impl CreateChannelUsecase {
     pub async fn execute(
@@ -70,7 +70,7 @@ impl CreateChannelUsecase {
     }
 }
 
-/// 更新渠道：加载原实体 → 合并入参（api_key 为空保持原值）→ 保存。
+/// Update a channel: load the original entity → merge the input (an empty api_key keeps the original value) → save.
 pub struct UpdateChannelUsecase;
 impl UpdateChannelUsecase {
     pub async fn execute(
@@ -98,7 +98,7 @@ impl UpdateChannelUsecase {
     }
 }
 
-/// 删除渠道；未命中返回 `NotFound`。
+/// Delete a channel; returns `NotFound` if missing.
 pub struct DeleteChannelUsecase;
 impl DeleteChannelUsecase {
     pub async fn execute(
@@ -111,7 +111,7 @@ impl DeleteChannelUsecase {
     }
 }
 
-/// 列出全部渠道。
+/// List all channels.
 pub struct ListChannelsUsecase;
 impl ListChannelsUsecase {
     pub async fn execute(
@@ -122,7 +122,7 @@ impl ListChannelsUsecase {
     }
 }
 
-/// 启停渠道：设置 `enabled` 并持久化。
+/// Enable / disable a channel: set `enabled` and persist.
 pub struct SetChannelEnabledUsecase;
 impl SetChannelEnabledUsecase {
     pub async fn execute(
@@ -139,7 +139,7 @@ impl SetChannelEnabledUsecase {
     }
 }
 
-/// 渠道连通性测试结果：回显给前端 + 持久化到渠道的 `last_test_*` 字段。
+/// Channel connectivity test result: echoed to the frontend + persisted to the channel's `last_test_*` fields.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelTestResult {
@@ -149,9 +149,9 @@ pub struct ChannelTestResult {
     pub error: Option<String>,
 }
 
-/// 渠道连通性测试：调用适配器 `test()`，把结果持久化到渠道的 `last_test_*` 并回显。
-/// 适配器配置错误（缺 api_key / base_url）同样记为失败结果，不抛用例错误
-/// （这样前端能看到「未配置」的失败原因，且结果可持久化）。
+/// Channel connectivity test: calls the adaptor `test()`, persists the result to the channel's `last_test_*` and echoes it.
+/// Adaptor configuration errors (missing api_key / base_url) are also recorded as failure results, not thrown as use case errors
+/// (so the frontend can see the "not configured" failure reason, and the result can be persisted).
 pub struct TestChannelUsecase;
 impl TestChannelUsecase {
     pub async fn execute(
@@ -184,7 +184,7 @@ impl TestChannelUsecase {
     }
 }
 
-/// 入参规范化：trim 名称（空名报错）；空 / 纯空白 Base URL / API Key 归一为 None，非空时也 trim。
+/// Normalize input: trim the name (a blank name errors); empty / whitespace-only Base URL / API Key normalize to None, and non-blank values are also trimmed.
 fn normalize(input: ChannelInput) -> Result<ChannelInput, ChannelError> {
     let name = input.name.trim();
     if name.is_empty() {
@@ -198,14 +198,14 @@ fn normalize(input: ChannelInput) -> Result<ChannelInput, ChannelError> {
     })
 }
 
-/// trim 后为空则归一为 None。
+/// Normalize to None if empty after trimming.
 fn non_blank(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-/// 把仓储层错误映射为用例层错误：`NotFound` 语义上等同用例的 `NotFound`。
+/// Map a repository error to a use case error: `NotFound` is semantically the same as the use case's `NotFound`.
 fn map_repo_error(e: RepositoryError) -> ChannelError {
     match e {
         RepositoryError::NotFound => ChannelError::NotFound,
@@ -218,7 +218,7 @@ mod tests {
     use super::*;
     use crate::test_support::InMemoryChannelRepository;
 
-    /// 构造一条合法的创建入参样本。
+    /// Build a valid sample creation input.
     fn input(name: &str) -> ChannelInput {
         ChannelInput {
             name: name.to_string(),
@@ -236,7 +236,7 @@ mod tests {
         }
     }
 
-    /// 创建：字段完整往返，仓储落库一条。
+    /// Create: all fields round-trip, one row persisted in the repository.
     #[tokio::test]
     async fn create_persists_channel_and_roundtrips_fields() {
         let repo = InMemoryChannelRepository::new();
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(all[0], created);
     }
 
-    /// 规范化：名称去首尾空白；纯空白 Base URL 归一为 None；非空 Base URL 去首尾空白后落库。
+    /// Normalize: the name is trimmed; a whitespace-only Base URL normalizes to None; a non-blank Base URL is trimmed before persisting.
     #[tokio::test]
     async fn create_normalizes_whitespace() {
         let repo = InMemoryChannelRepository::new();
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(created_blank.base_url, None);
     }
 
-    /// 创建：空名称（含纯空白）应拒绝且不落库。
+    /// Create: a blank name (including whitespace-only) is rejected and not persisted.
     #[tokio::test]
     async fn create_rejects_blank_name() {
         let repo = InMemoryChannelRepository::new();
@@ -298,7 +298,7 @@ mod tests {
         assert!(repo.list().await.expect("list").is_empty());
     }
 
-    /// 更新：字段合并，api_key 留空时保持原密钥，upsert 不产生新行。
+    /// Update: fields are merged, leaving api_key blank keeps the original key, upsert produces no new row.
     #[tokio::test]
     async fn update_merges_fields_and_keeps_existing_key_when_blank() {
         let repo = InMemoryChannelRepository::new();
@@ -308,7 +308,7 @@ mod tests {
             .expect("create");
 
         let mut update = input("openai-prod-v2");
-        update.api_key = None; // 编辑表单留空 → 保持原密钥
+        update.api_key = None; // edit form left blank → keep the original key
         update.priority = 5;
         update.enabled = false;
 
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(all[0], updated);
     }
 
-    /// 更新：显式传入新的 api_key 应覆盖原密钥。
+    /// Update: explicitly passing a new api_key should overwrite the original key.
     #[tokio::test]
     async fn update_overwrites_key_when_provided() {
         let repo = InMemoryChannelRepository::new();
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(updated.api_key.as_deref(), Some("sk-upstream-new"));
     }
 
-    /// 更新 / 删除 / 启停：未知 id 应返回 NotFound。
+    /// Update / delete / enable-disable: an unknown id returns NotFound.
     #[tokio::test]
     async fn mutate_unknown_id_errors_not_found() {
         let repo = InMemoryChannelRepository::new();
@@ -364,7 +364,7 @@ mod tests {
         ));
     }
 
-    /// 删除：删除后列表为空，二次删除报 NotFound。
+    /// Delete: the list is empty after deletion, a second delete reports NotFound.
     #[tokio::test]
     async fn delete_removes_channel_and_missing_errors() {
         let repo = InMemoryChannelRepository::new();
@@ -384,7 +384,7 @@ mod tests {
         ));
     }
 
-    /// 启停：false → true 往返，状态正确持久化。
+    /// Enable-disable: false → true round-trip, state persisted correctly.
     #[tokio::test]
     async fn set_enabled_toggles_state() {
         let repo = InMemoryChannelRepository::new();
@@ -406,7 +406,7 @@ mod tests {
         assert!(enabled.enabled);
     }
 
-    /// 列表：列出全部渠道（顺序交由仓储实现，此处只验证内容）。
+    /// List: returns all channels (ordering is left to the repository implementation; only content is verified here).
     #[tokio::test]
     async fn list_returns_all_channels() {
         let repo = InMemoryChannelRepository::new();
@@ -425,7 +425,7 @@ mod tests {
 
     use crate::test_support::MockProviderAdaptor;
 
-    /// 连通性测试：成功结果回显并持久化为 last_test_ok=true。
+    /// Connectivity test: a success result is echoed and persisted as last_test_ok=true.
     #[tokio::test]
     async fn test_channel_persists_success_result() {
         let repo = InMemoryChannelRepository::new();
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(saved.last_test_at, Some(result.tested_at));
     }
 
-    /// 连通性测试：失败结果回显错误原因并持久化为 last_test_ok=false。
+    /// Connectivity test: a failure result echoes the error reason and persists as last_test_ok=false.
     #[tokio::test]
     async fn test_channel_persists_failure_and_echoes_error() {
         let repo = InMemoryChannelRepository::new();
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(saved.last_test_at, Some(result.tested_at));
     }
 
-    /// 连通性测试：适配器配置错误（缺 api_key）同样记为失败结果并回显，不抛用例错误。
+    /// Connectivity test: adaptor configuration errors (missing api_key) are also recorded as failure results and echoed, not thrown as use case errors.
     #[tokio::test]
     async fn test_channel_records_config_error_as_failure() {
         let repo = InMemoryChannelRepository::new();
@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(saved.last_test_ok, Some(false));
     }
 
-    /// 连通性测试：未知 id 返回 NotFound，不产生持久化副作用。
+    /// Connectivity test: an unknown id returns NotFound, with no persistence side effects.
     #[tokio::test]
     async fn test_channel_unknown_id_errors_not_found() {
         let repo = InMemoryChannelRepository::new();

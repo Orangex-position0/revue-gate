@@ -1,5 +1,5 @@
-// 渠道管理页：渠道列表 + CRUD / 启停 / 连通性测试（ticket 04 / 06）。
-// 数据本地 useState + load()，CRUD 后就地刷新（见 Architecture-frontend.md「业务数据不进 store」）。
+// Channel management page: channel list + CRUD / enable-disable / connectivity test (ticket 04 / 06).
+// Data is local useState + load(), refreshed in place after CRUD (see Architecture-frontend.md "business data does not go into the store").
 import { useCallback, useEffect, useState } from "react";
 import { Activity, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { ChannelForm } from "./ChannelForm";
@@ -7,12 +7,12 @@ import { CHANNEL_TYPE_LABELS } from "@/lib/constants";
 import { channelApi, invokeErrorMessage } from "@/lib/api";
 import type { Channel } from "@/types";
 
-/** 表单状态：null = 关闭；{ channel: null } = 新建；{ channel } = 编辑。 */
+/** Form state: null = closed; { channel: null } = create; { channel } = edit. */
 type FormState = { channel: Channel | null } | null;
 
 const cellCls = "px-3 py-2 align-middle text-sm";
 
-/** 测试时间显示为本地时区短格式（后端存 UTC ISO-8601）。 */
+/** Test time shown in a short local-timezone format (the backend stores UTC ISO-8601). */
 function formatTestTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
@@ -22,7 +22,7 @@ export function ChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
-  /** 正在测试的渠道 id；非 null 时禁用该行测试按钮。 */
+  /** id of the channel being tested; non-null disables that row's test button. */
   const [testingId, setTestingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -40,14 +40,14 @@ export function ChannelsPage() {
     void load();
   }, [load]);
 
-  /** 保存回调：关闭表单后重拉列表——后端按「优先级升序 → 名称升序」排序，
-   *  重取保证界面顺序与数据库一致（创建 / 编辑都可能改变排序）。 */
+  /** Save callback: close the form and re-fetch the list — the backend sorts by "priority asc → name asc",
+   *  so re-fetching keeps the UI order consistent with the database (both create and edit can change the order). */
   function handleSaved() {
     setForm(null);
     void load();
   }
 
-  /** 启停：调 set_channel_enabled，用返回状态就地替换，保证与数据库一致。 */
+  /** Enable/disable: call set_channel_enabled and replace in place with the returned state, keeping it consistent with the database. */
   async function handleToggle(channel: Channel) {
     try {
       const updated = await channelApi.setEnabled(channel.id, !channel.enabled);
@@ -59,7 +59,7 @@ export function ChannelsPage() {
     }
   }
 
-  /** 连通性测试：调 test_channel 回显延迟 / 错误，重拉列表刷新 lastTest*。 */
+  /** Connectivity test: calls test_channel to echo latency / error, then re-fetches the list to refresh lastTest*. */
   async function handleTest(channel: Channel) {
     setTestingId(channel.id);
     try {

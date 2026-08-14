@@ -1,7 +1,7 @@
-//! 用例层：编排 domain + 调仓储 trait，组织数据流（见 docs/Architecture-backend.md）。
+//! Use case layer: orchestrates domain logic and repository traits, organizing the data flow (see docs/Architecture-backend.md).
 //!
-//! 依赖方向 `interface → usecases → domain`；仓储经 trait 注入（seam A 测试可 mock）。
-//! 命名约定：动词 + `Usecase` 后缀（如 `CreateChannelUsecase`）。
+//! Dependency direction `interface → usecases → domain`; repositories are injected via traits (seam A tests can mock).
+//! Naming convention: verb + `Usecase` suffix (e.g. `CreateChannelUsecase`).
 
 pub mod api_key;
 pub mod auth;

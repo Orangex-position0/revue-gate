@@ -1,13 +1,13 @@
-//! 网关设置用例：读取 / 保存编排。
+//! Gateway settings use cases: load / save orchestration.
 //!
-//! 无状态用例：仓储以 `&dyn SettingsRepository` 注入，seam A 测试可用内存 mock。
-//! 保存前做信任边界校验（host 非空）；具体持久化介质（tauri-plugin-store）在
-//! infrastructure，本层只依赖 domain trait。保存成功语义 = 仓储已持久化。
+//! Stateless use cases: repositories are injected as `&dyn SettingsRepository`, seam A tests can use in-memory mocks.
+//! A trust-boundary validation (non-empty host) runs before saving; the concrete persistence medium (tauri-plugin-store) lives in
+//! infrastructure, this layer only depends on the domain trait. Save success semantics = the repository has persisted.
 
 use crate::domain::error::RepositoryError;
 use crate::domain::settings::{GatewaySettings, SettingsRepository};
 
-/// 设置用例层错误。
+/// Settings use case layer error.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     #[error("invalid host: {0}")]
@@ -16,7 +16,7 @@ pub enum SettingsError {
     Repository(#[from] RepositoryError),
 }
 
-/// 读取设置：委托仓储（无持久化值时为默认设置）。
+/// Load settings: delegate to the repository (defaults when no persisted value).
 pub struct GetSettingsUsecase;
 impl GetSettingsUsecase {
     pub async fn execute(
@@ -27,8 +27,8 @@ impl GetSettingsUsecase {
     }
 }
 
-/// 保存设置：校验入参（信任边界）→ host 规范化 → 整体覆盖持久化。
-/// 返回规范化后的设置，供调用方写入共享状态（持久化值与即时生效值同源）。
+/// Save settings: validate the input (trust boundary) → normalize host → persist a full overwrite.
+/// Returns the normalized settings for the caller to write into shared state (the persisted value and the immediately-effective value share one source).
 pub struct SaveSettingsUsecase;
 impl SaveSettingsUsecase {
     pub async fn execute(
@@ -43,8 +43,8 @@ impl SaveSettingsUsecase {
     }
 }
 
-/// 入参校验（信任边界）：host 去首尾空白后必须非空。命令层在触发 OS 侧副作用
-/// （开机自启）之前先校验，避免「自启已改、配置未存」的中间态。
+/// Input validation (trust boundary): host must be non-empty after trimming. The command layer validates before triggering OS-side side effects
+/// (e.g. autostart), avoiding the intermediate state where "autostart was changed but the config was not saved".
 pub(crate) fn validate(settings: &GatewaySettings) -> Result<(), SettingsError> {
     if settings.host.trim().is_empty() {
         return Err(SettingsError::InvalidHost(settings.host.clone()));
@@ -52,7 +52,7 @@ pub(crate) fn validate(settings: &GatewaySettings) -> Result<(), SettingsError> 
     Ok(())
 }
 
-/// host 去首尾空白（与 api_key 名称规范化口径一致）。
+/// Trim the host (same normalization approach as api_key names).
 fn normalize_host(mut settings: GatewaySettings) -> GatewaySettings {
     settings.host = settings.host.trim().to_string();
     settings
@@ -64,7 +64,7 @@ mod tests {
     use crate::domain::settings::Theme;
     use crate::test_support::InMemorySettingsRepository;
 
-    /// 空仓储：读取返回默认设置（host 127.0.0.1、port 3000、主题 system、重试默认）。
+    /// Empty repository: load returns default settings (host 127.0.0.1, port 3000, theme system, default retry).
     #[tokio::test]
     async fn get_returns_defaults_when_empty() {
         let repo = InMemorySettingsRepository::new();
@@ -80,13 +80,13 @@ mod tests {
         assert_eq!(settings.retry.max_retries, None);
     }
 
-    /// 保存后读取：逐字段回读一致（含重试策略等嵌套配置）。
+    /// Save then load: every field round-trips consistently (including nested config such as the retry policy).
     #[tokio::test]
     async fn save_then_load_round_trips() {
         let repo = InMemorySettingsRepository::new();
         let settings = GatewaySettings {
             host: "0.0.0.0".to_string(),
-            port: 0, // 0 = 随机端口
+            port: 0, // 0 = random port
             theme: Theme::Dark,
             minimize_to_tray: true,
             close_to_tray: true,
@@ -108,7 +108,7 @@ mod tests {
         );
     }
 
-    /// 保存：host 为空白应拒绝且不落库（信任边界校验）。
+    /// Save: a blank host is rejected and not persisted (trust-boundary validation).
     #[tokio::test]
     async fn save_rejects_blank_host() {
         let repo = InMemorySettingsRepository::new();
@@ -130,7 +130,7 @@ mod tests {
         );
     }
 
-    /// 保存：host 去首尾空白后落库并返回规范化值（与 api_key 名称规范化口径一致）。
+    /// Save: the host is trimmed, persisted, and the normalized value is returned (same normalization approach as api_key names).
     #[tokio::test]
     async fn save_normalizes_host_whitespace() {
         let repo = InMemorySettingsRepository::new();

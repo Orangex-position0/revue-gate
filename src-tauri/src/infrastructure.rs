@@ -1,7 +1,7 @@
-//! 基础设施层：技术实现（sqlite 仓储、provider 适配器）。
+//! Infrastructure layer: technical implementations (sqlite repositories, provider adapters).
 //!
-//! 依赖方向：`infrastructure → domain`，实现 domain 定义的仓储/适配器接口。
-//! 本骨架阶段仅含 SQLite 连接池与内嵌迁移。
+//! Dependency direction: `infrastructure → domain`, implementing the repository/adapter interfaces
+//! defined by domain. At this skeleton stage it only contains the SQLite connection pool and embedded migrations.
 
 pub mod providers;
 pub mod sqlite;

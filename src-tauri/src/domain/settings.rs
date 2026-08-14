@@ -1,16 +1,16 @@
-//! 网关设置领域模型：端口 / host、主题、托盘行为、开机自启、失败重试策略。
+//! Gateway settings domain model: port / host, theme, tray behavior, autostart, failure retry policy.
 //!
-//! 纯业务类型与规则，零技术依赖：持久化由 tauri-plugin-store 实现在 infrastructure，
-//! 用例编排在 usecases/settings.rs（seam A 可用内存 mock 测试）。重试策略默认
-//! `{ enabled: true, max_retries: None }` 与 ticket 07 的「逐个渠道尝试」默认行为一致，
-//! 本模块只做配置落库与生效（见 ticket 12）。
+//! Pure business types and rules, zero technical dependencies: persistence is implemented by tauri-plugin-store in infrastructure,
+//! use-case orchestration is in usecases/settings.rs (seam A can be tested with an in-memory mock). The retry policy default
+//! `{ enabled: true, max_retries: None }` matches ticket 07's "try channels one by one" default behavior;
+//! this module only persists and applies the configuration (see ticket 12).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::error::RepositoryError;
 
-/// 界面主题三态。
+/// Three-state UI theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -20,13 +20,13 @@ pub enum Theme {
     Dark,
 }
 
-/// 失败重试策略：`enabled=false` 只试首个候选；`enabled=true` 且 `max_retries=None`
-/// 表示不限制（沿用 ticket 07 逐个尝试）；`max_retries=Some(n)` 表示首个之后最多再试 n 次。
+/// Failure retry policy: `enabled=false` only tries the first candidate; `enabled=true` with `max_retries=None`
+/// means unlimited (keeping ticket 07's try-each-one behavior); `max_retries=Some(n)` means at most n more tries after the first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RetryPolicy {
     pub enabled: bool,
-    /// 首次之后的额外重试次数；None = 不限制。
+    /// Extra retries after the first; None = unlimited.
     pub max_retries: Option<u32>,
 }
 
@@ -39,23 +39,23 @@ impl Default for RetryPolicy {
     }
 }
 
-/// 网关设置快照：设置页可编辑的全部配置项。
+/// Gateway settings snapshot: every config item editable on the settings page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct GatewaySettings {
-    /// 服务监听 host；默认 127.0.0.1。
+    /// Service listen host; default 127.0.0.1.
     pub host: String,
-    /// 服务监听端口；0 = 随机可用端口。
+    /// Service listen port; 0 = random available port.
     pub port: u16,
-    /// 界面主题。
+    /// UI theme.
     pub theme: Theme,
-    /// 最小化时隐藏到托盘。
+    /// Hide to tray when minimized.
     pub minimize_to_tray: bool,
-    /// 关闭窗口时隐藏到托盘（而非退出）。
+    /// Hide to tray (instead of exiting) when the window closes.
     pub close_to_tray: bool,
-    /// 开机自启。
+    /// Autostart at login.
     pub autostart: bool,
-    /// 失败重试策略。
+    /// Failure retry policy.
     pub retry: RetryPolicy,
 }
 
@@ -73,12 +73,12 @@ impl Default for GatewaySettings {
     }
 }
 
-/// 设置仓储：读写网关设置快照。持久化格式 / 存储介质由实现决定。
+/// Settings repository: reads and writes the gateway settings snapshot. Persistence format / storage medium is implementation-defined.
 #[async_trait]
 pub trait SettingsRepository: Send + Sync {
-    /// 读取设置；无持久化值时返回默认设置（`GatewaySettings::default()`）。
+    /// Load settings; returns defaults (`GatewaySettings::default()`) when nothing is persisted.
     async fn load(&self) -> Result<GatewaySettings, RepositoryError>;
-    /// 整体覆盖保存设置快照。
+    /// Overwrite-save the full settings snapshot.
     async fn save(&self, settings: &GatewaySettings) -> Result<(), RepositoryError>;
 }
 
@@ -87,8 +87,8 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    // 序列化往返不变量：任意设置 `to_value` 后 `from_value` 必须还原原值
-    // （强制档 PBT，见 rules/property-based-testing.md §2.1）。
+    // Serialization round-trip invariant: any settings must be restored by `from_value` after `to_value`
+    // (mandatory-tier PBT, see rules/property-based-testing.md §2.1).
     proptest! {
         #[test]
         fn settings_json_roundtrip(

@@ -1,9 +1,9 @@
-//! RequestLog 聚合根：实体 + 查询筛选值对象 + RequestLogRepository trait。
+//! RequestLog aggregate root: entity + query filter value object + RequestLogRepository trait.
 //!
-//! 每次请求全量记日志（`docs/Requirements.md` 请求日志）：密钥/渠道/模型/usage/耗时/
-//! trace id/请求体/是否流式/是否重试。查询分页与多条件筛选（keyword/密钥/渠道/模型/
-//! 日期范围）随阶段 10 加入；`LogQuery::matches` 是筛选语义的唯一权威定义，
-//! sqlx 实现据此生成等价的 WHERE（见 infrastructure/sqlite/request_log.rs）。
+//! Every request is fully logged (`docs/Requirements.md` request logging): key/channel/model/usage/duration/
+//! trace id/request body/is-stream/is-retry. Query pagination and multi-criteria filtering (keyword/key/channel/model/
+//! date range) arrive in stage 10; `LogQuery::matches` is the single authoritative definition of the filter semantics,
+//! and the sqlx implementation generates an equivalent WHERE from it (see infrastructure/sqlite/request_log.rs).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,72 +11,72 @@ use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
 
-/// RequestLog 实体：一次请求的完整审计记录。
+/// RequestLog entity: the complete audit record of one request.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestLog {
     pub id: Uuid,
-    /// 发起请求的本地密钥 id（认证通过时必填）。
+    /// Id of the local key that made the request (always present when authentication succeeded).
     pub api_key_id: Option<Uuid>,
-    /// 实际命中的上游渠道 id（候选耗尽时为 None）。
+    /// Id of the upstream channel actually used (None when no candidate remained).
     pub channel_id: Option<Uuid>,
-    /// 客户端请求的模型名。
+    /// Model name requested by the client.
     pub model: String,
-    /// 实际上游模型名（应用模型映射后）。
+    /// Actual upstream model name (after model mapping).
     pub upstream_model: Option<String>,
-    /// 网关返回给客户端的 HTTP 状态码。
+    /// HTTP status code the gateway returned to the client.
     pub status_code: u16,
-    /// usage：prompt / completion / total tokens（流式解析后回填）。
+    /// usage: prompt / completion / total tokens (backfilled after streaming parse).
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
     pub total_tokens: Option<u32>,
-    /// 请求总耗时（毫秒）。
+    /// Total request duration (milliseconds).
     pub duration_ms: u64,
-    /// 失败时的错误消息（候选耗尽、转发失败等）。
+    /// Error message on failure (no candidates left, forward failure, etc.).
     pub error_message: Option<String>,
-    /// 是否流式请求。
+    /// Whether the request was streaming.
     pub is_stream: bool,
-    /// 是否发生过重试。
+    /// Whether a retry occurred.
     pub is_retry: bool,
-    /// 贯穿请求的 trace id，用于链路追踪。
+    /// Trace id spanning the request, for request tracing.
     pub trace_id: String,
-    /// 客户端请求体（原文 JSON）。
+    /// Client request body (raw JSON).
     pub request_body: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
-/// 日志查询筛选条件：全部可选，None = 不筛该维度。
-/// 跨 Tauri Command 边界序列化（camelCase，与 `src/types/index.ts` 的 `LogQuery` 对齐）。
+/// Log query filter criteria: all optional, None = do not filter that dimension.
+/// Serialized across the Tauri Command boundary (camelCase, aligned with `LogQuery` in `src/types/index.ts`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogQuery {
-    /// 关键词：对 model / upstream_model / trace_id / error_message 做大小写不敏感子串匹配。
+    /// Keyword: case-insensitive substring match over model / upstream_model / trace_id / error_message.
     #[serde(default)]
     pub keyword: Option<String>,
-    /// 按发起密钥筛选（api_key_id 精确匹配；无认证的日志天然排除）。
+    /// Filter by originating key (exact api_key_id match; unauthenticated logs are naturally excluded).
     #[serde(default)]
     pub api_key_id: Option<Uuid>,
-    /// 按渠道筛选（channel_id 精确匹配）。
+    /// Filter by channel (exact channel_id match).
     #[serde(default)]
     pub channel_id: Option<Uuid>,
-    /// 按请求模型名筛选（大小写不敏感子串匹配，便于输入模型名前缀）。
+    /// Filter by requested model name (case-insensitive substring match, convenient for typing a model prefix).
     #[serde(default)]
     pub model: Option<String>,
-    /// 日期范围下界（左闭）：`created_at >= start_at`。
+    /// Date range lower bound (inclusive): `created_at >= start_at`.
     #[serde(default)]
     pub start_at: Option<DateTime<Utc>>,
-    /// 日期范围上界（右开）：`created_at < end_at`。
+    /// Date range upper bound (exclusive): `created_at < end_at`.
     #[serde(default)]
     pub end_at: Option<DateTime<Utc>>,
 }
 
 impl LogQuery {
-    /// 判断一条日志是否命中全部筛选条件（None = 该维度不筛）。
+    /// Whether a log matches all filter criteria (None = dimension not filtered).
     ///
-    /// 这是筛选语义的**唯一权威定义**，sqlx 实现据此生成等价的 WHERE 子句
-    /// （见 infrastructure/sqlite/request_log.rs）：keyword / model 为大小写不敏感
-    /// 子串匹配（LIKE 侧对 `%`/`_` 做转义保持字面匹配），日期区间左闭右开
-    /// `[start_at, end_at)`。InMemory 仓储直接调用本函数，与 SQL 行为一致。
+    /// This is the **single authoritative definition** of the filter semantics; the sqlx implementation generates an equivalent WHERE clause from it
+    /// (see infrastructure/sqlite/request_log.rs): keyword / model are case-insensitive
+    /// substring matches (the LIKE side escapes `%`/`_` to keep literal matching), and the date range is half-open
+    /// `[start_at, end_at)`. The in-memory repository calls this function directly, consistent with the SQL behavior.
     pub fn matches(&self, log: &RequestLog) -> bool {
         if let Some(keyword) = self.keyword.as_deref() {
             let needle = keyword.to_lowercase();
@@ -122,51 +122,51 @@ impl LogQuery {
     }
 }
 
-/// 分页查询结果：当前页日志 + 满足筛选的总条数（供前端算总页数）。
+/// Paginated query result: current page of logs + total count matching the filter (for the frontend to compute total pages).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogPage {
-    /// 当前页的日志（按创建时间倒序，最新在前）。
+    /// Logs on the current page (descending by creation time, newest first).
     pub items: Vec<RequestLog>,
-    /// 满足筛选条件的日志总数（与当前页无关）。
+    /// Total number of logs matching the filter (independent of the current page).
     pub total: u64,
 }
 
-/// 统计投影行：仪表盘聚合所需的轻量列（不含 request_body，避免统计扫描拖回大字段）。
-/// `stat_rows` 返回此类型，聚合逻辑在 usecases/stats.rs（纯 Rust，单一代码路径，
-/// sqlx 与 InMemory 实现数据一致，见 Spec §Testing seam A）。
+/// Stat projection row: lightweight columns for dashboard aggregation (no request_body, to avoid pulling large fields back in stats scans).
+/// `stat_rows` returns this type; aggregation logic lives in usecases/stats.rs (pure Rust, single code path,
+/// so sqlx and in-memory implementations agree on data, see Spec §Testing seam A).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogStatRow {
-    /// 网关返回给客户端的 HTTP 状态码（<400 视为成功，用于渠道可用率）。
+    /// HTTP status code returned to the client (<400 counts as success, used for channel availability).
     pub status_code: u16,
-    /// 本次请求总 token（流式解析后回填；未解析到则为 None，按 0 计）。
+    /// Total tokens for this request (backfilled after streaming parse; None when not parsed, counted as 0).
     pub total_tokens: Option<u32>,
-    /// 请求总耗时（毫秒）。
+    /// Total request duration (milliseconds).
     pub duration_ms: u64,
     pub created_at: DateTime<Utc>,
 }
 
-/// RequestLog 仓储 trait：领域层定义接口，infrastructure 提供 sqlx 实现。
+/// RequestLog repository trait: interface defined in the domain layer, sqlx implementation provided by infrastructure.
 #[async_trait::async_trait]
 pub trait RequestLogRepository: Send + Sync {
-    /// 写入一条请求日志。
+    /// Write one request log.
     async fn save(&self, log: &RequestLog) -> Result<(), RepositoryError>;
-    /// 按 id 查找日志详情。
+    /// Look up log details by id.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<RequestLog>, RepositoryError>;
-    /// 分页查询日志：多条件筛选（keyword / 密钥 / 渠道 / 模型 / 日期范围），
-    /// 按创建时间倒序（同时间按 id 倒序兜底），page 从 1 起。
+    /// Paginated log query: multi-criteria filter (keyword / key / channel / model / date range),
+    /// descending by creation time (ties broken by descending id), page starts at 1.
     async fn query(
         &self,
         query: &LogQuery,
         page: u64,
         page_size: u64,
     ) -> Result<LogPage, RepositoryError>;
-    /// 删除创建时间严格早于 `before` 的日志（左闭右开上界），返回删除条数。
+    /// Delete logs created strictly before `before` (half-open upper bound), returning the deleted count.
     async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, RepositoryError>;
-    /// 清空全部日志，返回删除条数。
+    /// Clear all logs, returning the deleted count.
     async fn clear(&self) -> Result<u64, RepositoryError>;
-    /// 统计投影：返回落在左闭右开区间 `[start_at, end_at)` 内的轻量日志行
-    /// （时间维度 None = 不限）。聚合逻辑在 usecases，本方法只做取数与过滤。
+    /// Stat projection: returns lightweight log rows in the half-open interval `[start_at, end_at)`
+    /// (None time dimension = no bound). Aggregation lives in usecases; this method only fetches and filters.
     async fn stat_rows(
         &self,
         start_at: Option<DateTime<Utc>>,

@@ -1,7 +1,7 @@
-// 设置中心页：服务启停 + host/端口 / 主题 / 托盘与开机自启 / 失败重试策略。
-// 数据本地 useState + load()（业务数据不进 store，见 Architecture-frontend.md）。
-// 启停按钮只调 serverApi：运行状态由 server 事件经 useServerStore 同步，不自改 store。
-// 主题由 useTheme 单点持有（顶栏同源），保存时并入整包设置。
+// Settings center page: server start/stop + host/port / theme / tray and autostart / failure retry policy.
+// Data is local useState + load() (business data does not go into the store, see Architecture-frontend.md).
+// The start/stop buttons only call serverApi: the running state is synced via useServerStore from server events, never mutated here.
+// The theme is held in a single place by useTheme (same source as the top bar); saving merges it into the full settings package.
 import { useCallback, useEffect, useState } from "react";
 import { ThemeSelector } from "@/components/ThemeSelector";
 import { useTheme } from "@/hooks/use-theme";
@@ -19,7 +19,7 @@ export function SettingsPage() {
   const { theme, changeTheme } = useTheme();
   const { running, host, port } = useServerStore();
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
-  // 数字字段以字符串承载，保存时解析校验（与 ApiKeyForm 配额口径一致）。
+  // Numeric fields are carried as strings and parsed/validated on save (consistent with the ApiKeyForm quota semantics).
   const [portInput, setPortInput] = useState("");
   const [retryInput, setRetryInput] = useState("");
   const [loading, setLoading] = useState(true);
@@ -51,7 +51,7 @@ export function SettingsPage() {
     void load();
   }, [load]);
 
-  /** 布尔 / host 字段就地更新（不可变）。 */
+  /** Update boolean / host fields in place (immutably). */
   const setField = <K extends keyof GatewaySettings>(
     key: K,
     value: GatewaySettings[K],
@@ -143,7 +143,7 @@ export function SettingsPage() {
       )}
       {!loading && !loadError && settings && (
         <>
-          {/* 服务运行：启停按钮触发后端，状态灯经事件桥接同步 */}
+          {/* Server running: start/stop buttons trigger the backend; the status indicator syncs via the event bridge */}
           <section className={cardCls}>
             <h3 className="mb-2 text-base font-semibold">服务运行</h3>
             <div className="flex items-center gap-3">
@@ -180,7 +180,7 @@ export function SettingsPage() {
             )}
           </section>
 
-          {/* 服务监听：host + 端口（0 = 随机） */}
+          {/* Server listener: host + port (0 = random) */}
           <section className={cardCls}>
             <h3 className="mb-3 text-base font-semibold">服务监听</h3>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -215,7 +215,7 @@ export function SettingsPage() {
             </div>
           </section>
 
-          {/* 主题三态：与顶栏同源，改动即应用并持久化 */}
+          {/* Theme tri-state: same source as the top bar; changes apply and persist immediately */}
           <section className={cardCls}>
             <h3 className="mb-3 text-base font-semibold">界面主题</h3>
             <div className="flex items-center gap-3">
@@ -226,7 +226,7 @@ export function SettingsPage() {
             </div>
           </section>
 
-          {/* 托盘与开机自启 */}
+          {/* Tray and autostart */}
           <section className={cardCls}>
             <h3 className="mb-3 text-base font-semibold">托盘与开机自启</h3>
             <div className="space-y-2">
@@ -263,7 +263,7 @@ export function SettingsPage() {
             </p>
           </section>
 
-          {/* 失败重试策略 */}
+          {/* Failure retry policy */}
           <section className={cardCls}>
             <h3 className="mb-3 text-base font-semibold">失败重试</h3>
             <div className="space-y-4">

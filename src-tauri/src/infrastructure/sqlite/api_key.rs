@@ -1,8 +1,8 @@
-//! SQLite 密钥仓储实现：`ApiKeyRepository` trait 的 sqlx 落地。
+//! SQLite API key repository implementation: the sqlx implementation of the `ApiKeyRepository` trait.
 //!
-//! 与 `migrations/001_init.sql` 的 api_keys 表对应：`quota_limit` / `quota_used` 以
-//! INTEGER 存取（SQLite 为有符号 64 位，读回时从 i64 转换为 u64，负值视为行数据损坏）。
-//! `key` 列带 UNIQUE 约束；`delete` 未命中返回 `RepositoryError::NotFound`。
+//! Maps to the api_keys table in `migrations/001_init.sql`: `quota_limit` / `quota_used` are stored as
+//! INTEGER (signed 64-bit in SQLite; read back as i64 and converted to u64, with negative values treated as
+//! corrupted row data). The `key` column has a UNIQUE constraint; a missed `delete` returns `RepositoryError::NotFound`.
 
 use std::str::FromStr;
 
@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
 use crate::domain::error::RepositoryError;
 
-/// 密钥表行映射：与 `migrations/001_init.sql` 的 api_keys 列一一对应。
-/// INTEGER 列读为 i64，再由 `TryFrom` 转换为领域层的 u64。
+/// Row mapping for the API key table: one-to-one with the api_keys columns in `migrations/001_init.sql`.
+/// INTEGER columns are read as i64, then converted to the domain layer's u64 via `TryFrom`.
 #[derive(FromRow)]
 struct ApiKeyDb {
     id: String,
@@ -28,11 +28,11 @@ struct ApiKeyDb {
     updated_at: String,
 }
 
-/// 查询列清单（各查询共用，避免重复书写）。
+/// SELECT column list (shared by all queries to avoid repetition).
 const SELECT_COLUMNS: &str = "id, name, key, enabled, quota_limit, quota_used, \
      created_at, updated_at";
 
-/// 基于 sqlx 连接池的 ApiKeyRepository 实现。
+/// ApiKeyRepository implementation backed by an sqlx pool.
 pub struct SqliteApiKeyRepository {
     pool: SqlitePool,
 }
@@ -67,7 +67,7 @@ impl ApiKeyRepository for SqliteApiKeyRepository {
         row.map(ApiKey::try_from).transpose()
     }
 
-    /// 列出全部密钥，按「名称升序 → 创建时间升序」排序（列表视图的稳定顺序）。
+    /// Lists all keys, ordered by "name ASC → created_at ASC" (a stable order for the list view).
     async fn list(&self) -> Result<Vec<ApiKey>, RepositoryError> {
         let rows: Vec<ApiKeyDb> = sqlx::query_as(&format!(
             "SELECT {SELECT_COLUMNS} FROM api_keys ORDER BY name ASC, created_at ASC"
@@ -78,11 +78,12 @@ impl ApiKeyRepository for SqliteApiKeyRepository {
         rows.into_iter().map(ApiKey::try_from).collect()
     }
 
-    /// upsert 语义：存在同 id 行则覆盖，否则插入。
-    /// 密钥明文不随更新变更，故 ON CONFLICT 不覆盖 `key`（UNIQUE 列若参与覆盖，
-    /// 更新 key 可能触发 UNIQUE 冲突导致整条写入失败）。
+    /// Upsert semantics: overwrite when a row with the same id exists, otherwise insert.
+    /// The key plaintext never changes on update, so ON CONFLICT does not overwrite `key` (if the UNIQUE
+    /// column were overwritten, updating key could trigger a UNIQUE conflict and fail the whole write).
     async fn save(&self, api_key: &ApiKey) -> Result<(), RepositoryError> {
-        // 配额列以有符号 i64 落库：超 i64 范围的值拒绝写入（否则读回时 i64_to_u64 判坏行）。
+        // Quota columns are stored as signed i64: values beyond the i64 range are rejected (otherwise
+        // i64_to_u64 would flag a bad row on read-back).
         let quota_limit = api_key
             .quota
             .limit
@@ -114,7 +115,7 @@ impl ApiKeyRepository for SqliteApiKeyRepository {
         Ok(())
     }
 
-    /// 删除密钥；未命中（0 行受影响）返回 `NotFound`。
+    /// Deletes a key; a miss (0 rows affected) returns `NotFound`.
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
         let result = sqlx::query("DELETE FROM api_keys WHERE id = ?")
             .bind(id.to_string())
@@ -150,12 +151,12 @@ impl TryFrom<ApiKeyDb> for ApiKey {
     }
 }
 
-/// 把库内有符号 i64 转换为领域层 u64（负值说明行数据损坏）。
+/// Converts a stored signed i64 to the domain layer's u64 (negative values indicate corrupted row data).
 fn i64_to_u64(value: i64, column: &str) -> Result<u64, RepositoryError> {
     u64::try_from(value).map_err(|_| bad_row(&format!("{column} out of range for u64")))
 }
 
-/// 解析库内 RFC3339 时间字符串为 `DateTime<Utc>`。
+/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
 fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -166,7 +167,7 @@ fn db_err(e: sqlx::Error) -> RepositoryError {
     RepositoryError::Database(e.to_string())
 }
 
-/// 构造「行数据损坏」类错误：库内数据无法解析为领域模型。
+/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
 fn bad_row(reason: &str) -> RepositoryError {
     RepositoryError::Database(format!("invalid api_key row: {reason}"))
 }
@@ -181,7 +182,7 @@ mod tests {
         SqliteApiKeyRepository::new(init_pool("sqlite::memory:").await.expect("init pool"))
     }
 
-    /// 保存后按 id 找回：全部字段（含配额、可空列、布尔、时间）往返一致。
+    /// After save, find by id: all fields (quota, nullable columns, booleans, timestamps) round-trip consistently.
     #[tokio::test]
     async fn save_then_find_roundtrips_all_fields() {
         let repo = new_repo().await;
@@ -202,7 +203,7 @@ mod tests {
         assert_eq!(found, api_key);
     }
 
-    /// find_by_key：按密钥明文查找（认证用），未命中返回 None。
+    /// find_by_key: looks up by key plaintext (used for auth); returns None when missing.
     #[tokio::test]
     async fn find_by_key_locates_exact_key() {
         let repo = new_repo().await;
@@ -223,7 +224,7 @@ mod tests {
         );
     }
 
-    /// upsert：同 id 重复保存只覆盖不新增行（配额与启停更新生效）。
+    /// Upsert: re-saving the same id overwrites without adding a row (quota and enable/disable updates take effect).
     #[tokio::test]
     async fn save_upserts_by_id_does_not_duplicate() {
         let repo = new_repo().await;
@@ -245,7 +246,7 @@ mod tests {
         assert!(!found.enabled);
     }
 
-    /// 排序：按名称升序（同名按创建时间升序）。
+    /// Ordering: name ascending (same name sorted by created_at ascending).
     #[tokio::test]
     async fn list_orders_by_name_then_created() {
         let repo = new_repo().await;
@@ -266,7 +267,7 @@ mod tests {
         assert_eq!(names, vec!["a-key", "b-key"]);
     }
 
-    /// 删除：删除后查无此行；对缺失 id 再删返回 NotFound。
+    /// Delete: the row is gone after deletion; deleting a missing id again returns NotFound.
     #[tokio::test]
     async fn delete_removes_row_and_missing_errors() {
         let repo = new_repo().await;
@@ -285,7 +286,7 @@ mod tests {
         assert!(matches!(err, RepositoryError::NotFound));
     }
 
-    /// 无上限（quota_limit = NULL）读回为 None。
+    /// No limit (quota_limit = NULL) reads back as None.
     #[tokio::test]
     async fn null_quota_limit_roundtrips_as_none() {
         let repo = new_repo().await;

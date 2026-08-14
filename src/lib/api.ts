@@ -1,4 +1,4 @@
-// Command 薄封装：全项目唯一的 invoke 调用点，按域分组。类型与后端 Command 签名对齐。
+// Thin Command wrapper: the only invoke call site in the project, grouped by domain. Types align with the backend Command signatures.
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ApiKey,
@@ -14,78 +14,78 @@ import type {
   StatsSnapshot,
 } from "@/types";
 
-/** 统一错误转换：Tauri Command 返回 Result<T, String>，invoke 拒绝值可能是 String / Error。 */
+/** Unified error conversion: Tauri Commands return Result<T, String>; invoke rejection values may be String / Error. */
 export function invokeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 export const serverApi = {
-  /** 查询服务当前运行状态（webview 首挂载校准，常规刷新依赖事件）。 */
+  /** Query the current server running status (reconciled on first webview mount; regular refreshes rely on events). */
   status: () => invoke<ServerStatus>("get_server_status"),
-  /** 启动服务：host/port 省略时读取已保存的共享设置（0 = 随机端口）。
-   *  返回新状态；运行状态以 server-started 事件为准（事件桥接）。 */
+  /** Start the service: when host/port are omitted, read the saved shared settings (0 = random port).
+   *  Returns the new status; the running state is governed by the server-started event (event bridge). */
   start: (host?: string, port?: number) =>
     invoke<ServerStatus>("start_server", { host, port }),
-  /** 停止服务：返回停止后的状态；运行状态以 server-stopped 事件为准。 */
+  /** Stop the service: returns the post-stop status; the running state is governed by the server-stopped event. */
   stop: () => invoke<ServerStatus>("stop_server"),
 };
 
 export const settingsApi = {
-  /** 读取设置快照（未持久化时返回默认设置）。 */
+  /** Read the settings snapshot (returns defaults when nothing has been persisted). */
   get: () => invoke<GatewaySettings>("get_settings"),
-  /** 整体保存设置快照：校验 → 应用开机自启 → 持久化 → 更新共享设置（即时生效）。 */
+  /** Save the full settings snapshot: validate → apply autostart → persist → update shared settings (effective immediately). */
   save: (settings: GatewaySettings) =>
     invoke<void>("save_settings", { settings }),
 };
 
 export const channelApi = {
-  /** 列出全部渠道（按优先级升序；apiKey 已被后端遮蔽）。 */
+  /** List all channels (ascending by priority; apiKey is masked by the backend). */
   list: () => invoke<Channel[]>("list_channels"),
-  /** 创建渠道并返回（apiKey 被遮蔽）。 */
+  /** Create a channel and return it (apiKey is masked). */
   create: (input: ChannelInput) => invoke<Channel>("create_channel", { input }),
-  /** 更新渠道并返回（input.apiKey 为 null = 保持原密钥）。 */
+  /** Update a channel and return it (input.apiKey null = keep the original key). */
   update: (id: string, input: ChannelInput) =>
     invoke<Channel>("update_channel", { id, input }),
-  /** 删除渠道。 */
+  /** Delete a channel. */
   remove: (id: string) => invoke<void>("delete_channel", { id }),
-  /** 启停渠道并返回（状态正确持久化）。 */
+  /** Enable/disable a channel and return it (state is persisted correctly). */
   setEnabled: (id: string, enabled: boolean) =>
     invoke<Channel>("set_channel_enabled", { id, enabled }),
-  /** 渠道连通性测试：调用上游模型列表端点，返回结果并落库（lastTestAt / lastTestOk）。 */
+  /** Channel connectivity test: calls the upstream model-list endpoint, returns the result, and persists it (lastTestAt / lastTestOk). */
   test: (id: string) => invoke<ChannelTestResult>("test_channel", { id }),
 };
 
 export const apiKeyApi = {
-  /** 列出全部密钥（按名称升序；key 已被后端遮蔽为占位符）。 */
+  /** List all API keys (ascending by name; key is masked to a placeholder by the backend). */
   list: () => invoke<ApiKey[]>("list_api_keys"),
-  /** 创建密钥并返回完整明文（仅此路径下发明文，调用方需一次性展示）。 */
+  /** Create an API key and return the full plaintext (the only path that reveals it; the caller must display it once). */
   create: (input: ApiKeyInput) => invoke<ApiKey>("create_api_key", { input }),
-  /** 更新密钥并返回（key 被遮蔽；密钥本身不可更新）。 */
+  /** Update an API key and return it (key is masked; the key itself cannot be updated). */
   update: (id: string, input: ApiKeyInput) =>
     invoke<ApiKey>("update_api_key", { id, input }),
-  /** 删除密钥。 */
+  /** Delete an API key. */
   remove: (id: string) => invoke<void>("delete_api_key", { id }),
-  /** 启停密钥并返回（状态正确持久化）。 */
+  /** Enable/disable an API key and return it (state is persisted correctly). */
   setEnabled: (id: string, enabled: boolean) =>
     invoke<ApiKey>("set_api_key_enabled", { id, enabled }),
 };
 
 export const logApi = {
-  /** 分页查询日志：多条件筛选（keyword / 密钥 / 渠道 / 模型 / 日期范围），按创建时间倒序。 */
+  /** Paginated log query: multi-criteria filters (keyword / key / channel / model / date range), newest first by creation time. */
   list: (query: LogQuery, page: number, pageSize: number) =>
     invoke<LogPage>("list_logs", { query, page, pageSize }),
-  /** 日志详情：请求日志 + 从请求体解析出的对话 / 参数 / 工具标签。 */
+  /** Log detail: request log + conversation / parameters / tool tags parsed from the request body. */
   detail: (id: string) => invoke<LogDetail>("get_log_detail", { id }),
-  /** 删除创建时间严格早于 before（ISO-8601）的日志，返回删除条数。 */
+  /** Delete logs created strictly before before (ISO-8601); returns the number deleted. */
   deleteBefore: (before: string) =>
     invoke<number>("delete_logs_before", { before }),
-  /** 清空全部请求日志，返回删除条数。 */
+  /** Clear all request logs; returns the number deleted. */
   clear: () => invoke<number>("clear_logs"),
 };
 
 export const statsApi = {
-  /** 仪表盘统计快照：卡片指标 + 7 天趋势。
-   *  timezoneOffsetMinutes 为前端本地时区偏移（JS `Date.getTimezoneOffset()`：西为正，东为负）。 */
+  /** Dashboard stats snapshot: card metrics + 7-day trend.
+   *  timezoneOffsetMinutes is the frontend local timezone offset (JS `Date.getTimezoneOffset()`: positive west, negative east). */
   get: (timezoneOffsetMinutes: number) =>
     invoke<StatsSnapshot>("get_stats", { timezoneOffsetMinutes }),
 };

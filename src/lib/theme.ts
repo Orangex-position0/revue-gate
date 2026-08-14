@@ -1,7 +1,7 @@
-// 主题三态应用：light / dark / system。
-// system 不写 data-theme，由 CSS 媒体查询（prefers-color-scheme）响应，零 JS 监听。
-// 主题类型归 types/（与后端 Theme 枚举对齐），此处 re-export 保持现有导入路径。
-// 持久化走后端设置（settingsApi，ticket 12）；localStorage 仅作渲染前首帧缓存。
+// Theme tri-state application: light / dark / system.
+// system writes no data-theme; the CSS media query (prefers-color-scheme) responds, with zero JS listeners.
+// The theme type lives in types/ (aligned with the backend Theme enum); re-exported here to keep existing import paths.
+// Persistence goes through backend settings (settingsApi, ticket 12); localStorage is only a pre-render first-frame cache.
 import type { Theme } from "@/types";
 
 export type { Theme };
@@ -10,7 +10,7 @@ export const THEME_STORAGE_KEY = "revue-gate-theme";
 
 export const THEME_OPTIONS: Theme[] = ["light", "dark", "system"];
 
-/** 应用主题：显式 light/dark 写 data-theme 属性；system 移除属性交给 CSS 媒体查询。 */
+/** Apply the theme: explicit light/dark set the data-theme attribute; system removes it, leaving it to the CSS media query. */
 export function applyTheme(theme: Theme): void {
   const root = document.documentElement;
   if (theme === "system") {
@@ -20,7 +20,7 @@ export function applyTheme(theme: Theme): void {
   }
 }
 
-/** 读取本地存储的主题，非法或缺失时回退为跟随系统。 */
+/** Read the locally stored theme, falling back to system when invalid or missing. */
 export function getStoredTheme(): Theme {
   const stored = localStorage.getItem(THEME_STORAGE_KEY);
   return stored === "light" || stored === "dark" || stored === "system"

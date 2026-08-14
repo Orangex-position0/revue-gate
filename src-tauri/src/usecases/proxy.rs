@@ -1,15 +1,15 @@
-//! 转发用例引擎：网关核心调度闭环（认证 → 选渠道 → 模型映射 → 转发 → 解析 usage → 记账 → 写日志 → 失败按序重试）。
+//! Forwarding use case engine: the gateway's core scheduling loop (auth → select channel → model mapping → forward → parse usage → bill → write log → retry failures in order).
 //!
-//! `ProxyRequestUsecase` 不接真实 HTTP：三仓储以 `Arc<dyn Trait>` 注入、适配器经解析闭包注入
-//! （seam A 可全 mock，见 Spec §Testing）。流程：
-//! 1. 认证（复用 AuthenticateRequestUsecase，401 / 429）；
-//! 2. `ChannelSelector` 选候选渠道（启用 → 模型匹配 → 优先级升序）；
-//! 3. 应用模型映射改写 `body["model"]`，逐候选尝试：
-//!    - 非流式成功（非可重试状态码）→ 记账 + 写成功日志后返回；
-//!    - 失败（传输错误 / 429 / 5xx）→ 写一次失败日志后尝试下一候选，不超过候选渠道数；
-//! 4. 流式：打开失败同样按序重试；打开成功后返回包装流，流结束（正常或出错）时聚合 usage 记账 + 写日志。
+//! `ProxyRequestUsecase` does not touch real HTTP: the three repositories are injected as `Arc<dyn Trait>`, and the adaptor is injected via a resolver closure
+//! (seam A can be fully mocked, see Spec §Testing). Flow:
+//! 1. Authenticate (reuses AuthenticateRequestUsecase, 401 / 429);
+//! 2. `ChannelSelector` picks candidate channels (enabled → model match → priority ascending);
+//! 3. Apply the model mapping to rewrite `body["model"]`, try candidates one by one:
+//!    - Non-stream success (non-retryable status code) → bill + write a success log, then return;
+//!    - Failure (transport error / 429 / 5xx) → write one failure log, then try the next candidate, never exceeding the candidate count;
+//! 4. Streaming: open failures also retry in order; after a successful open, return a wrapped stream that aggregates usage billing + logging when the stream ends (normally or on error).
 //!
-//! 记账 / 日志写入为尽力而为：上游已成功处理时，记账失败不应让客户端收到 5xx 而重复计费。
+//! Billing / log writes are best-effort: when the upstream has already processed the request, a billing failure must not surface a 5xx to the client and cause double billing.
 
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -31,20 +31,20 @@ use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
 
-/// 代理用例错误：分支与数据面 HTTP 状态码一一对应（401 / 429 / 404 / 502）。
+/// Proxy use case error: variants map one-to-one to data-plane HTTP status codes (401 / 429 / 404 / 502).
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
     #[error("invalid or missing api key")]
-    /// 应返回 401。
+    /// Should return 401.
     Unauthorized,
     #[error("quota exceeded")]
-    /// 应返回 429。
+    /// Should return 429.
     QuotaExceeded,
     #[error("no candidate channel supports model '{0}'")]
-    /// 应返回 404（模型不可路由）。
+    /// Should return 404 (model not routable).
     NoCandidateChannel(String),
     #[error("all {attempts} candidate channel(s) failed: {last_error}")]
-    /// 全部候选失败，应返回 502。
+    /// All candidates failed, should return 502.
     NoChannelAvailable {
         attempts: usize,
         last_status: Option<u16>,
@@ -80,22 +80,22 @@ impl From<ApiKeyError> for ProxyError {
     }
 }
 
-/// 代理入参：数据面从 HTTP 请求解析后传入。
+/// Proxy request input: parsed from the HTTP request by the data plane.
 #[derive(Debug, Clone)]
 pub struct ProxyRequest {
-    /// Authorization Bearer 令牌（已剥离 `Bearer ` 前缀；None = 无有效头）。
+    /// Authorization Bearer token (`Bearer ` prefix stripped; None = no valid header).
     pub bearer_token: Option<String>,
-    /// 客户端请求的模型名（`body["model"]`）。
+    /// Model name requested by the client (`body["model"]`).
     pub model: String,
-    /// 是否流式（对应 `body["stream"]`）。
+    /// Whether streaming (corresponds to `body["stream"]`).
     pub stream: bool,
-    /// 原始 OpenAI 兼容请求体（JSON）。
+    /// Raw OpenAI-compatible request body (JSON).
     pub body: Value,
-    /// 贯穿请求的 trace id（写日志用）。
+    /// Trace id spanning the request (for logging).
     pub trace_id: String,
 }
 
-/// 代理成功结果：非流式响应，或流式事件流（流结束时报账/写日志已内联）。
+/// Proxy success result: a non-stream response, or a stream of events (billing / logging on stream end is inlined).
 pub enum ProxySuccess {
     NonStream(ProviderResponse),
     Stream(BoxStream<'static, Result<StreamEvent, ProxyError>>),
@@ -110,16 +110,16 @@ impl std::fmt::Debug for ProxySuccess {
     }
 }
 
-/// 按渠道解析适配器的解析器（生产注入 `infrastructure::providers::adaptor_for`）。
+/// Resolver that resolves an adaptor per channel (production injects `infrastructure::providers::adaptor_for`).
 type AdaptorResolver = Box<dyn Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync>;
 
-/// 转发用例：编排认证 → 选渠道 → 映射 → 转发 → 记账 → 日志 → 重试。
+/// Forwarding use case: orchestrates auth → select channel → mapping → forward → bill → log → retry.
 pub struct ProxyRequestUsecase {
     api_key_repo: Arc<dyn ApiKeyRepository>,
     channel_repo: Arc<dyn ChannelRepository>,
     log_repo: Arc<dyn RequestLogRepository>,
     adaptor: AdaptorResolver,
-    /// 共享网关设置：execute 时读取重试策略（保存设置后即时生效，无需重建用例）。
+    /// Shared gateway settings: the retry policy is read at execute time (takes effect immediately after saving settings, no need to rebuild the use case).
     settings: Arc<RwLock<GatewaySettings>>,
 }
 
@@ -140,27 +140,27 @@ impl ProxyRequestUsecase {
         }
     }
 
-    /// 执行一次请求转发闭环。
+    /// Execute one request forwarding loop.
     pub async fn execute(&self, request: ProxyRequest) -> Result<ProxySuccess, ProxyError> {
         let model = request.model.trim();
         if model.is_empty() {
             return Err(ProxyError::InvalidRequest("model must not be empty".into()));
         }
 
-        // 1) 认证：无 / 无效 / 停用密钥 → 401；配额超限 → 429。
+        // 1) Authenticate: missing / invalid / disabled key → 401; quota exceeded → 429.
         let api_key = AuthenticateRequestUsecase
             .execute(self.api_key_repo.as_ref(), request.bearer_token.as_deref())
             .await?;
 
-        // 2) 选候选渠道：启用 → 模型匹配 → 优先级升序。
+        // 2) Select candidate channels: enabled → model match → priority ascending.
         let candidates = ChannelSelector::select(&self.channel_repo.list().await?, model);
         if candidates.is_empty() {
             return Err(ProxyError::NoCandidateChannel(model.to_string()));
         }
 
-        // 2b) 重试策略（共享设置，execute 时读取）决定本轮最多尝试次数：
-        //     关闭 → 只试首个候选；开启且不限 → 全部候选（ticket 07 默认行为）；
-        //     开启且限 n → 首个之后最多再试 n 次（总尝试 = n + 1），且不超过候选数。
+        // 2b) The retry policy (shared settings, read at execute time) determines the max attempts this round:
+        //     disabled → try only the first candidate; enabled and unlimited → all candidates (ticket 07 default behavior);
+        //     enabled with limit n → at most n more tries after the first (total attempts = n + 1), capped by the candidate count.
         let retry = self
             .settings
             .read()
@@ -177,7 +177,7 @@ impl ProxyRequestUsecase {
         }
         .min(candidates.len());
 
-        // 3) 逐候选尝试：成功即返回；失败记录日志后尝试下一个（不超过 max_attempts）。
+        // 3) Try candidates one by one: return on success; on failure log and try the next (not exceeding max_attempts).
         let mut attempts = 0usize;
         let mut last_status: Option<u16> = None;
         let mut last_error = String::new();
@@ -262,7 +262,7 @@ impl ProxyRequestUsecase {
     }
 }
 
-/// 应用模型映射：命中 `client_model` 用 `upstream_model`，未映射直传客户端模型名。
+/// Apply model mapping: use `upstream_model` when `client_model` matches, otherwise pass the client model name through.
 fn apply_mapping(channel: &Channel, client_model: &str) -> String {
     channel
         .model_mappings
@@ -272,12 +272,12 @@ fn apply_mapping(channel: &Channel, client_model: &str) -> String {
         .unwrap_or_else(|| client_model.to_string())
 }
 
-/// 可重试状态码：429（上游限流）与 5xx（上游服务器错误）换下一候选；4xx 属客户端/模型错误不重试。
+/// Retryable status codes: 429 (upstream rate limit) and 5xx (upstream server error) switch to the next candidate; 4xx are client/model errors and are not retried.
 fn is_retryable(status: u16) -> bool {
     status == 429 || (500..=599).contains(&status)
 }
 
-/// 记账：按 usage 归一后的 total tokens 累加密钥已用额度（无 usage 或 total 为 0 时不动作）。
+/// Bill: accumulate the key's used quota by the normalized total tokens of usage (no-op when usage is missing or total is 0).
 async fn accumulate_usage(
     api_key_repo: &dyn ApiKeyRepository,
     api_key_id: Uuid,
@@ -297,7 +297,7 @@ async fn accumulate_usage(
         .map_err(ProxyError::from)
 }
 
-/// 一次上游尝试的共享上下文：请求 + 认证后的 key + 选中渠道 + 映射后模型 + 重试标记 + 起始时间。
+/// Shared context of one upstream attempt: request + authenticated key + selected channel + mapped model + retry flag + start time.
 #[derive(Clone)]
 struct AttemptContext {
     request: ProxyRequest,
@@ -308,7 +308,7 @@ struct AttemptContext {
     started: Instant,
 }
 
-/// 成功路径报账 + 写日志（尽力而为：上游已成功，记账失败仅告警不阻断响应）。
+/// Success path billing + logging (best-effort: the upstream already succeeded; a billing failure only warns and does not block the response).
 async fn record_success(
     api_key_repo: &dyn ApiKeyRepository,
     log_repo: &dyn RequestLogRepository,
@@ -324,7 +324,7 @@ async fn record_success(
     }
 }
 
-/// 失败路径写日志：状态码缺失（传输错误）记 502；重试循环不受日志失败影响。
+/// Failure path logging: a missing status code (transport error) is recorded as 502; the retry loop is unaffected by log failures.
 async fn record_failure(
     log_repo: &dyn RequestLogRepository,
     ctx: &AttemptContext,
@@ -342,7 +342,7 @@ async fn record_failure(
     }
 }
 
-/// 组装一条请求日志（token 字段由 u64 usage 收窄为 u32）。
+/// Build a request log (token fields narrowed from u64 usage to u32).
 fn build_log(
     ctx: &AttemptContext,
     status_code: u16,
@@ -369,17 +369,17 @@ fn build_log(
     }
 }
 
-/// 流结束时的报账/写日志状态。
+/// Billing / logging state at stream end.
 struct StreamState {
     inner: BoxStream<'static, Result<StreamEvent, ProviderError>>,
     done: bool,
     usage: Usage,
 }
 
-/// 包装上游流：逐帧聚合 usage，流正常结束（None）时记账 + 写成功日志，
-/// 中途出错（Err）时按已聚合的增量 usage 记账 + 写失败日志后终止（US19「每次请求累加密钥配额」）。
-/// 打开流本身失败的重试在 execute 内处理。
-/// ponytail: 客户端中途断开导致流未被拉尽时不报账/写日志；v0.1 接受，升级需取消感知包装。
+/// Wrap the upstream stream: aggregate usage frame by frame; on normal end (None) bill + write a success log,
+/// on mid-stream error (Err) bill the aggregated incremental usage + write a failure log and terminate (US19 "accumulate key quota per request").
+/// Retries for failures while opening the stream itself are handled inside execute.
+/// ponytail: if the client disconnects mid-stream and the stream is not fully drained, no billing/logging happens; accepted for v0.1, an upgrade needs a cancellation-aware wrapper.
 fn wrap_stream_bookkeeping(
     inner: BoxStream<'static, Result<StreamEvent, ProviderError>>,
     api_key_repo: Arc<dyn ApiKeyRepository>,
@@ -410,7 +410,7 @@ fn wrap_stream_bookkeeping(
                     Some(Err(err)) => {
                         state.done = true;
                         let proxy_err = ProxyError::Provider(err);
-                        // 已下发的增量 usage 也累加配额（与失败日志记录的 total_tokens 一致；尽力而为）。
+                        // The incremental usage already emitted also accumulates quota (consistent with the total_tokens recorded in the failure log; best-effort).
                         if let Err(e) = accumulate_usage(
                             api_key_repo.as_ref(),
                             ctx.api_key.id,
@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    /// 组装用例 + 共享仓储 + 指定重试策略的共享设置（测试侧持 Arc 事后断言日志 / 配额）。
+    /// Assemble the use case + shared repositories + shared settings with the given retry policy (the test keeps the Arcs to assert logs / quota afterwards).
     fn harness_with_retry(
         adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
         retry: RetryPolicy,
@@ -539,7 +539,7 @@ mod tests {
         (uc, keys, channels, logs)
     }
 
-    /// 默认重试策略（开启、不限）的组装：既有测试语义不变（ticket 07 逐个尝试）。
+    /// Assemble with the default retry policy (enabled, unlimited): existing test semantics unchanged (ticket 07 tries one by one).
     fn harness(
         adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
     ) -> (
@@ -557,7 +557,7 @@ mod tests {
         move |_: &Channel| Box::new(MockForwardAdaptor::new(Ok(response.clone()), Ok(vec![])))
     }
 
-    /// 成功闭环：转发返回 200 + usage，日志落一条（is_retry=false），配额累加 total。
+    /// Success loop: forward returns 200 + usage, one log row (is_retry=false), quota accumulates total.
     #[tokio::test]
     async fn success_forwards_and_records_log_and_accumulates_quota() {
         let (uc, keys, _channels, logs) =
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(saved.quota.used, 15, "配额累加 total tokens");
     }
 
-    /// 模型映射：请求 client_model 映射为 upstream_model，body["model"] 一并改写。
+    /// Model mapping: the requested client_model maps to upstream_model, and body["model"] is rewritten accordingly.
     #[tokio::test]
     async fn applies_model_mapping_to_upstream_request() {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -629,7 +629,7 @@ mod tests {
         assert_eq!(sent[0].body["model"], "gpt-4o", "body 一并改写");
     }
 
-    /// 无 Bearer → 401，不产生日志。
+    /// Missing Bearer → 401, no log produced.
     #[tokio::test]
     async fn missing_bearer_returns_unauthorized_without_log() {
         let (uc, _keys, channels, logs) = harness(single_ok_adaptor(ok_response(200, None)));
@@ -646,7 +646,7 @@ mod tests {
         );
     }
 
-    /// 配额超限 → 429，不产生日志。
+    /// Quota exceeded → 429, no log produced.
     #[tokio::test]
     async fn quota_exceeded_returns_quota_error_without_log() {
         let (uc, keys, channels, logs) = harness(single_ok_adaptor(ok_response(200, None)));
@@ -665,7 +665,7 @@ mod tests {
         assert!(all_request_logs(&*logs).await.is_empty());
     }
 
-    /// 空模型名 → InvalidRequest，不查库不写日志。
+    /// Empty model name → InvalidRequest, no repo query and no log.
     #[tokio::test]
     async fn empty_model_is_invalid_request() {
         let (uc, keys, _channels, logs) = harness(single_ok_adaptor(ok_response(200, None)));
@@ -679,7 +679,7 @@ mod tests {
         assert!(all_request_logs(&*logs).await.is_empty());
     }
 
-    /// 模型不被任何启用渠道支持 → NoCandidateChannel，不转发不写日志。
+    /// Model not supported by any enabled channel → NoCandidateChannel, no forward and no log.
     #[tokio::test]
     async fn no_candidate_channel_errors_without_log() {
         let (uc, keys, channels, logs) = harness(single_ok_adaptor(ok_response(200, None)));
@@ -694,7 +694,7 @@ mod tests {
         assert!(all_request_logs(&*logs).await.is_empty());
     }
 
-    /// 禁用渠道不参与候选：适配器不会对禁用渠道被调用。
+    /// Disabled channels do not participate in candidates: the adaptor is never called for disabled channels.
     #[tokio::test]
     async fn disabled_channel_excluded_from_candidates() {
         let (uc, keys, channels, logs) = harness(single_ok_adaptor(ok_response(200, None)));
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(all_request_logs(&*logs).await.len(), 1);
     }
 
-    /// 5xx 可重试：候选 a 失败记一条失败日志，候选 b 成功记一条成功日志，is_retry=true，配额只算成功。
+    /// 5xx is retryable: candidate a fails and records a failure log, candidate b succeeds and records a success log, is_retry=true, quota counts only the success.
     #[tokio::test]
     async fn retries_next_candidate_after_http_5xx() {
         let adaptor = move |c: &Channel| -> Box<dyn ProviderAdaptor> {
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(saved.quota.used, 15, "失败尝试不计配额，只累加成功 usage");
     }
 
-    /// 传输错误可重试：候选 a 转发报 ProviderError（状态码缺失记 502），候选 b 成功。
+    /// Transport error is retryable: candidate a's forward returns ProviderError (missing status code recorded as 502), candidate b succeeds.
     #[tokio::test]
     async fn retries_next_candidate_after_transport_error() {
         let adaptor = move |c: &Channel| -> Box<dyn ProviderAdaptor> {
@@ -803,7 +803,7 @@ mod tests {
         );
     }
 
-    /// 全部候选失败 → NoChannelAvailable（attempts = 候选数），每条失败各写一条日志。
+    /// All candidates fail → NoChannelAvailable (attempts = candidate count), one log per failure.
     #[tokio::test]
     async fn all_candidates_fail_returns_no_channel_available() {
         let adaptor = |_c: &Channel| -> Box<dyn ProviderAdaptor> {
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(all_request_logs(&*logs).await.len(), 2);
     }
 
-    /// 4xx 客户端错误不重试：候选 a 返回 400 原样透传给客户端，只记一条日志。
+    /// 4xx client errors are not retried: candidate a's 400 is passed through to the client as-is, only one log is recorded.
     #[tokio::test]
     async fn does_not_retry_on_client_error_4xx() {
         let adaptor = |_c: &Channel| -> Box<dyn ProviderAdaptor> {
@@ -864,9 +864,9 @@ mod tests {
         assert_eq!(all_request_logs(&*logs).await.len(), 1, "未发生重试");
     }
 
-    // ---- 流式 ----
+    // ---- streaming ----
 
-    /// 流式成功：逐帧透传，流结束后聚合 usage 记账并写一条成功日志（is_stream=true）。
+    /// Stream success: frames pass through, usage is aggregated and billed when the stream ends, one success log (is_stream=true).
     #[tokio::test]
     async fn stream_success_accumulates_usage_and_logs_on_completion() {
         let events = vec![
@@ -918,7 +918,7 @@ mod tests {
         assert_eq!(saved.quota.used, 5, "流式结束后累加 usage total");
     }
 
-    /// 流式打开失败可重试：候选 a 打开流失败记失败日志，候选 b 成功。
+    /// Stream open failure is retryable: candidate a's stream open fails and records a failure log, candidate b succeeds.
     #[tokio::test]
     async fn stream_open_failure_retries_next_candidate() {
         let events = vec![Ok(StreamEvent {
@@ -973,8 +973,8 @@ mod tests {
         assert!(ok.is_retry);
     }
 
-    /// 流中途出错：写一条失败日志（携带已聚合的增量 usage）+ 按增量 usage 记账后终止
-    /// （已发出的帧不受影响；US19 每次请求累加密钥配额，含未收尾的流）。
+    /// Mid-stream error: write a failure log (carrying the aggregated incremental usage) + bill the incremental usage, then terminate
+    /// (frames already emitted are unaffected; US19 accumulates key quota per request, including streams that did not complete).
     #[tokio::test]
     async fn stream_midway_error_writes_failure_log_and_bills_partial_usage() {
         let events = vec![
@@ -1029,7 +1029,7 @@ mod tests {
         );
     }
 
-    /// 构造「全部候选固定失败（可重试状态码）」的共享 recorder 适配器：记录每次 forward 调用。
+    /// Build a shared recorder adaptor where "all candidates fail fixedly (retryable status)": records every forward call.
     fn failing_recorder(
         recorder: Arc<Mutex<Vec<ChatRequest>>>,
         status: u16,
@@ -1043,7 +1043,7 @@ mod tests {
         }
     }
 
-    /// 重试关闭：即使有多个候选也只试首个（全部失败时 attempts=1，无额外转发）。
+    /// Retry disabled: only the first candidate is tried even with multiple candidates (attempts=1 when all fail, no extra forwards).
     #[tokio::test]
     async fn retry_disabled_tries_only_first_candidate() {
         let recorder = Arc::new(Mutex::new(Vec::new()));
@@ -1069,7 +1069,7 @@ mod tests {
         assert_eq!(recorder.lock().unwrap().len(), 1, "只发生一次 forward");
     }
 
-    /// 重试开启且限次：max_retries=n → 总尝试 n+1（首个 + n 次重试），不越界。
+    /// Retry enabled with a limit: max_retries=n → total attempts n+1 (first + n retries), never out of bounds.
     #[tokio::test]
     async fn retry_limit_caps_attempts() {
         let recorder = Arc::new(Mutex::new(Vec::new()));
@@ -1096,7 +1096,7 @@ mod tests {
         assert_eq!(recorder.lock().unwrap().len(), 2, "首个 + 1 次重试");
     }
 
-    /// 重试限次高于候选数：实际尝试数被候选数封顶（不产生越界 / 空迭代）。
+    /// Retry limit above the candidate count: actual attempts are capped by the candidate count (no out-of-bounds / empty iteration).
     #[tokio::test]
     async fn retry_limit_higher_than_candidates_is_bounded() {
         let recorder = Arc::new(Mutex::new(Vec::new()));
@@ -1122,7 +1122,7 @@ mod tests {
         assert_eq!(recorder.lock().unwrap().len(), 2);
     }
 
-    /// 重试开启且不限（默认）：逐个尝试全部候选——ticket 07 默认行为不被设置落地破坏。
+    /// Retry enabled and unlimited (default): try all candidates one by one — ticket 07's default behavior is not broken by the settings feature.
     #[tokio::test]
     async fn retry_unlimited_tries_all_candidates() {
         let recorder = Arc::new(Mutex::new(Vec::new()));

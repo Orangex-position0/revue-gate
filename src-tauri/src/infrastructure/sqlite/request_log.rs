@@ -1,9 +1,10 @@
-//! SQLite 请求日志仓储实现：`RequestLogRepository` trait 的 sqlx 落地。
+//! SQLite request log repository implementation: the sqlx implementation of the `RequestLogRepository` trait.
 //!
-//! 与 `migrations/001_init.sql` 的 request_logs 表对应：INTEGER 列读为 i64 再转换为领域层
-//! u16/u32/u64（负值视为行数据损坏）。`save` 为追加语义（每条日志 id 唯一）；`query`
-//! 分页 + 多条件筛选，WHERE 语义与 `LogQuery::matches` 等价（见 domain/request_log.rs）；
-//! `delete_before` / `clear` 维护日志保留策略。时间一律以固定 9 位小数 RFC3339 落库。
+//! Maps to the request_logs table in `migrations/001_init.sql`: INTEGER columns are read as i64, then converted
+//! to the domain layer's u16/u32/u64 (negative values indicate corrupted row data). `save` is append-only (each
+//! log id is unique); `query` paginates with multi-condition filtering, with WHERE semantics equivalent to
+//! `LogQuery::matches` (see domain/request_log.rs); `delete_before` / `clear` maintain the log retention policy.
+//! Timestamps are always stored as RFC3339 with a fixed 9 fractional digits.
 
 use std::str::FromStr;
 
@@ -15,8 +16,8 @@ use uuid::Uuid;
 use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
 
-/// 请求日志表行映射：与 `migrations/001_init.sql` 的 request_logs 列一一对应。
-/// INTEGER 列读为 i64，再由 `TryFrom` 转换为领域层的窄类型。
+/// Row mapping for the request log table: one-to-one with the request_logs columns in `migrations/001_init.sql`.
+/// INTEGER columns are read as i64, then converted to the domain layer's narrow types via `TryFrom`.
 #[derive(FromRow)]
 struct RequestLogDb {
     id: String,
@@ -37,7 +38,7 @@ struct RequestLogDb {
     created_at: String,
 }
 
-/// 统计投影表行映射：只含聚合所需列（不含 request_body，见 `LogStatRow`）。
+/// Row mapping for the stats projection: only the columns needed for aggregation (no request_body, see `LogStatRow`).
 #[derive(FromRow)]
 struct StatRowDb {
     status_code: i64,
@@ -46,12 +47,12 @@ struct StatRowDb {
     created_at: String,
 }
 
-/// 查询列清单（各查询共用，避免重复书写）。
+/// SELECT column list (shared by all queries to avoid repetition).
 const SELECT_COLUMNS: &str = "id, api_key_id, channel_id, model, upstream_model, status_code, \
      prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, \
      is_retry, trace_id, request_body, created_at";
 
-/// 基于 sqlx 连接池的 RequestLogRepository 实现。
+/// RequestLogRepository implementation backed by an sqlx pool.
 pub struct SqliteRequestLogRepository {
     pool: SqlitePool,
 }
@@ -64,7 +65,7 @@ impl SqliteRequestLogRepository {
 
 #[async_trait::async_trait]
 impl RequestLogRepository for SqliteRequestLogRepository {
-    /// 追加写入一条请求日志（id 唯一，不做 upsert）。
+    /// Appends a request log (id is unique; no upsert).
     async fn save(&self, log: &RequestLog) -> Result<(), RepositoryError> {
         sqlx::query(
             "INSERT INTO request_logs (id, api_key_id, channel_id, model, upstream_model, \
@@ -113,7 +114,7 @@ impl RequestLogRepository for SqliteRequestLogRepository {
     ) -> Result<LogPage, RepositoryError> {
         let (where_sql, binds) = build_where(query);
 
-        // 满足筛选条件的总数（与当前页无关，供前端算总页数）。
+        // Total count matching the filters (independent of the current page; lets the frontend compute total pages).
         let count_sql = format!("SELECT COUNT(*) FROM request_logs {where_sql}");
         let mut count = sqlx::query(&count_sql);
         for b in &binds {
@@ -121,7 +122,8 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         }
         let total: i64 = count.fetch_one(&self.pool).await.map_err(db_err)?.get(0);
 
-        // 当前页：LIMIT/OFFSET + 时间倒序（同时间 id 倒序兜底）。OFFSET 从 0 起，page 从 1 起。
+        // Current page: LIMIT/OFFSET + time descending (same-time rows fall back to id descending).
+        // OFFSET starts at 0, page at 1.
         let offset = (page.saturating_sub(1)).saturating_mul(page_size);
         let page_sql = format!(
             "SELECT {SELECT_COLUMNS} FROM request_logs {where_sql} \
@@ -165,8 +167,9 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         Ok(result.rows_affected())
     }
 
-    /// 统计投影：只取聚合所需列（不含 request_body），左闭右开区间 `[start_at, end_at)`，
-    /// 与 `LogQuery::matches` 的日期语义一致。聚合在 usecases/stats.rs 完成。
+    /// Stats projection: only the columns needed for aggregation (no request_body), half-open interval
+    /// `[start_at, end_at)`, matching the date semantics of `LogQuery::matches`. Aggregation happens in
+    /// usecases/stats.rs.
     async fn stat_rows(
         &self,
         start_at: Option<DateTime<Utc>>,
@@ -199,17 +202,17 @@ impl RequestLogRepository for SqliteRequestLogRepository {
     }
 }
 
-/// 库内时间格式：固定 9 位小数 + `Z`（`SecondsFormat::Nanos`）。
-/// 可变精度格式（`to_rfc3339` 的 AutoSi）会在亚秒日志与整秒边界比较时失配——
-/// `"12:00:00Z"` 与 `"12:00:00.123456789Z"` 在 `'Z'`(0x5A) / `'.'`(0x2E) 处顺序颠倒，
-/// 破坏日期过滤的左闭右开语义。全库（写入与查询绑定）统一本格式保证可比较，
-/// 且纳秒精度完整往返（与领域层 `DateTime<Utc>` 一致）。
+/// Stored time format: fixed 9 fractional digits + `Z` (`SecondsFormat::Nanos`).
+/// A variable-precision format (`to_rfc3339`'s AutoSi) mismatches when comparing subsecond logs against whole-second
+/// boundaries — `"12:00:00Z"` vs `"12:00:00.123456789Z"` differ at `'Z'`(0x5A) / `'.'`(0x2E), breaking the half-open
+/// semantics of date filtering. Using this format everywhere (write and query binds) keeps values comparable,
+/// and nanosecond precision round-trips fully (consistent with the domain layer's `DateTime<Utc>`).
 fn fmt_time(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
-/// 把 `%` / `_` / `\` 转义为字面量并包成 LIKE 全匹配模式（配合 `ESCAPE '\'`）。
-/// 与 `LogQuery::matches` 的子串语义一致（见 domain/request_log.rs）。
+/// Escapes `%` / `_` / `\` as literals and wraps them into a LIKE full-match pattern (with `ESCAPE '\'`).
+/// Consistent with the substring semantics of `LogQuery::matches` (see domain/request_log.rs).
 fn like_pattern(term: &str) -> String {
     let mut escaped = String::with_capacity(term.len() + 2);
     escaped.push('%');
@@ -223,14 +226,14 @@ fn like_pattern(term: &str) -> String {
     escaped
 }
 
-/// 由 `LogQuery` 生成 WHERE 子句与绑定值：维度顺序与 `LogQuery::matches` 对齐
-/// （keyword / api_key_id / channel_id / model / 日期区间），全部 AND 组合。
+/// Builds the WHERE clause and bind values from `LogQuery`: dimension order aligns with `LogQuery::matches`
+/// (keyword / api_key_id / channel_id / model / date range), all combined with AND.
 fn build_where(query: &LogQuery) -> (String, Vec<String>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
     if let Some(keyword) = &query.keyword {
-        // keyword 对四个字段做大小写不敏感子串匹配（LIKE 对 ASCII 大小写不敏感）。
+        // keyword does a case-insensitive substring match on four fields (LIKE is case-insensitive for ASCII).
         let pattern = like_pattern(keyword);
         clauses.push(
             "(model LIKE ? ESCAPE '\\' OR upstream_model LIKE ? ESCAPE '\\' \
@@ -314,7 +317,8 @@ impl TryFrom<RequestLogDb> for RequestLog {
     }
 }
 
-/// 把库内有符号 i64 收窄为领域层的窄整数类型（负值或溢出视为行数据损坏）。
+/// Narrows a stored signed i64 to the domain layer's narrow integer type (negative or overflow values
+/// indicate corrupted row data).
 fn narrow<T: TryFrom<i64>>(column: &str, value: i64) -> Result<T, RepositoryError>
 where
     T::Error: std::fmt::Debug,
@@ -338,7 +342,7 @@ impl TryFrom<StatRowDb> for LogStatRow {
     }
 }
 
-/// 解析库内 RFC3339 时间字符串为 `DateTime<Utc>`。
+/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
 fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -349,7 +353,7 @@ fn db_err(e: sqlx::Error) -> RepositoryError {
     RepositoryError::Database(e.to_string())
 }
 
-/// 构造「行数据损坏」类错误：库内数据无法解析为领域模型。
+/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
 fn bad_row(reason: &str) -> RepositoryError {
     RepositoryError::Database(format!("invalid request_log row: {reason}"))
 }
@@ -364,7 +368,7 @@ mod tests {
         SqliteRequestLogRepository::new(init_pool("sqlite::memory:").await.expect("init pool"))
     }
 
-    /// 保存后按 id 找回：全部字段（含可空列、布尔、token 窄类型、时间）往返一致。
+    /// After save, find by id: all fields (nullable columns, booleans, token narrow types, timestamps) round-trip consistently.
     #[tokio::test]
     async fn save_then_find_roundtrips_all_fields() {
         let repo = new_repo().await;
@@ -388,7 +392,7 @@ mod tests {
         assert_eq!(found, log);
     }
 
-    /// 未命中 id 返回 None。
+    /// A missing id returns None.
     #[tokio::test]
     async fn find_missing_returns_none() {
         let repo = new_repo().await;
@@ -400,7 +404,7 @@ mod tests {
         );
     }
 
-    /// 追加语义：同 id 重复 save 直接冲突报错（不做 upsert 静默覆盖）。
+    /// Append-only: re-saving the same id fails with a conflict (no silent upsert overwrite).
     #[tokio::test]
     async fn save_is_append_only() {
         let repo = new_repo().await;
@@ -410,7 +414,7 @@ mod tests {
         assert_eq!(all_request_logs(&repo).await.len(), 1);
     }
 
-    /// 构造一条 created_at 固定、trace_id 可控的日志（供筛选/分页测试控制时间顺序）。
+    /// Builds a log with a fixed created_at and a controllable trace_id (so filter/pagination tests control time order).
     fn log_at(trace: &str, created_at: DateTime<Utc>) -> RequestLog {
         let mut log = sample_request_log();
         log.trace_id = trace.to_string();
@@ -418,14 +422,14 @@ mod tests {
         log
     }
 
-    /// 解析固定 UTC 时间点（测试用，避免依赖 Utc::now 的毫秒级抖动）。
+    /// Parses a fixed UTC time point (for tests, to avoid millisecond jitter from Utc::now).
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
             .map(|dt| dt.with_timezone(&Utc))
             .expect("valid rfc3339")
     }
 
-    /// 无筛选：全量分页返回，按创建时间倒序，total = 全部条数。
+    /// No filter: returns all rows paginated, ordered by created_at descending, total = all rows.
     #[tokio::test]
     async fn query_without_filter_paginates_all_desc() {
         let repo = new_repo().await;
@@ -445,7 +449,7 @@ mod tests {
         assert_eq!(page.total, 2);
     }
 
-    /// keyword：大小写不敏感子串匹配 model（model 全大写，关键词全小写也命中）。
+    /// keyword: case-insensitive substring match on model (a fully-uppercase model still matches an all-lowercase keyword).
     #[tokio::test]
     async fn query_filters_by_keyword_case_insensitive() {
         let repo = new_repo().await;
@@ -472,7 +476,7 @@ mod tests {
         assert_eq!(page.total, 1);
     }
 
-    /// keyword 命中 error_message 与 trace_id 也计为命中。
+    /// keyword matches in error_message and trace_id also count as hits.
     #[tokio::test]
     async fn query_keyword_matches_error_message_and_trace_id() {
         let repo = new_repo().await;
@@ -497,14 +501,14 @@ mod tests {
             )
             .await
             .expect("query");
-        // "xyz" 在 by_error 的 error_message 与 by_trace 的 trace_id 中都出现。
+        // "xyz" appears both in by_error's error_message and by_trace's trace_id.
         let mut ids: Vec<&str> = page.items.iter().map(|l| l.trace_id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["err", "trace-xyz-99"]);
         assert_eq!(page.total, 2);
     }
 
-    /// api_key_id：精确匹配，其他密钥/无认证的日志被排除。
+    /// api_key_id: exact match; logs under other keys / unauthenticated logs are excluded.
     #[tokio::test]
     async fn query_filters_by_api_key_id_exact() {
         let repo = new_repo().await;
@@ -532,7 +536,7 @@ mod tests {
         assert_eq!(page.total, 1);
     }
 
-    /// channel_id：精确匹配。
+    /// channel_id: exact match.
     #[tokio::test]
     async fn query_filters_by_channel_id_exact() {
         let repo = new_repo().await;
@@ -559,7 +563,7 @@ mod tests {
         assert_eq!(ids, vec!["a"]);
     }
 
-    /// model：大小写不敏感子串匹配（可输入模型名前缀）。
+    /// model: case-insensitive substring match (a model name prefix can be entered).
     #[tokio::test]
     async fn query_filters_by_model_prefix_case_insensitive() {
         let repo = new_repo().await;
@@ -586,7 +590,7 @@ mod tests {
         assert_eq!(page.total, 1);
     }
 
-    /// 日期范围：左闭右开 [start_at, end_at)——下界含、上界不含。
+    /// Date range: half-open [start_at, end_at) — lower bound inclusive, upper bound exclusive.
     #[tokio::test]
     async fn query_filters_by_half_open_date_range() {
         let repo = new_repo().await;
@@ -620,9 +624,9 @@ mod tests {
         assert_eq!(page.total, 2);
     }
 
-    /// 日期范围含亚秒 created_at：整秒下界应命中亚秒日志、等于上界应排除。
-    /// 依赖库内固定 9 位小数格式（`SecondsFormat::Nanos`）——可变精度格式
-    /// 会让 `12:00:00Z` 与 `12:00:00.123456789Z` 的字符串比较在 `Z`/`.` 处失配。
+    /// Date range with subsecond created_at: a whole-second lower bound should match subsecond logs; a value equal
+    /// to the upper bound should be excluded. Relies on the fixed 9-digit format (`SecondsFormat::Nanos`) — a
+    /// variable-precision format makes string comparison of `12:00:00Z` vs `12:00:00.123456789Z` mismatch at `Z`/`.`.
     #[tokio::test]
     async fn query_date_range_handles_subsecond_created_at() {
         let repo = new_repo().await;
@@ -630,7 +634,7 @@ mod tests {
             .await
             .expect("save sub");
 
-        // 整秒下界 12:00:00Z 应命中 12:00:00.123456Z（>= 语义）。
+        // A whole-second lower bound of 12:00:00Z should match 12:00:00.123456Z (>= semantics).
         let page = repo
             .query(
                 &LogQuery {
@@ -645,7 +649,7 @@ mod tests {
         let ids: Vec<&str> = page.items.iter().map(|l| l.trace_id.as_str()).collect();
         assert_eq!(ids, vec!["sub"]);
 
-        // 亚秒上界 12:00:00.123456Z：sub 恰等于上界，`<` 语义应排除。
+        // Subsecond upper bound 12:00:00.123456Z: sub equals the bound exactly, so `<` semantics should exclude it.
         let page = repo
             .query(
                 &LogQuery {
@@ -660,7 +664,7 @@ mod tests {
         assert!(page.items.is_empty());
     }
 
-    /// 多条件组合：api_key_id + model + 日期范围 交集。
+    /// Combined filters: intersection of api_key_id + model + date range.
     #[tokio::test]
     async fn query_combines_multiple_filters() {
         let repo = new_repo().await;
@@ -700,7 +704,7 @@ mod tests {
         assert_eq!(page.total, 1);
     }
 
-    /// LIKE 通配符字面匹配：model 里的 `%`/`_` 转义为字面量，不做通配。
+    /// LIKE wildcard literal matching: `%`/`_` in model are escaped as literals, not treated as wildcards.
     #[tokio::test]
     async fn query_escapes_like_wildcards_in_model() {
         let repo = new_repo().await;
@@ -727,7 +731,8 @@ mod tests {
         assert_eq!(page.total, 1);
     }
 
-    /// 分页：page_size 截断、末页取余量，total 始终 = 全部命中数（与当前页无关）。
+    /// Pagination: page_size truncates, the last page takes the remainder, total always = all hits (independent
+    /// of the current page).
     #[tokio::test]
     async fn query_paginates_and_tracks_total() {
         let repo = new_repo().await;
@@ -745,7 +750,7 @@ mod tests {
             .expect("page 1");
         assert_eq!(page1.items.len(), 2);
         assert_eq!(page1.total, 5);
-        // 最新在前：log-4（01-05）最先。
+        // Newest first: log-4 (01-05) comes first.
         let ids: Vec<&str> = page1.items.iter().map(|l| l.trace_id.as_str()).collect();
         assert_eq!(ids, vec!["log-4", "log-3"]);
 
@@ -758,7 +763,7 @@ mod tests {
         assert_eq!(page3.total, 5);
     }
 
-    /// 删除严格早于阈值的日志（< before），边界日志保留。
+    /// Deletes logs strictly older than the threshold (< before); boundary logs are kept.
     #[tokio::test]
     async fn delete_before_removes_only_older_logs() {
         let repo = new_repo().await;
@@ -786,7 +791,7 @@ mod tests {
         assert_eq!(remaining, vec!["new".to_string(), "boundary".to_string()]);
     }
 
-    /// 清空：全部日志删除，返回删除条数。
+    /// Clear: deletes all logs, returning the number deleted.
     #[tokio::test]
     async fn clear_removes_all_logs() {
         let repo = new_repo().await;
@@ -802,7 +807,8 @@ mod tests {
         assert!(all_request_logs(&repo).await.is_empty());
     }
 
-    /// 统计投影：只含聚合列（无 request_body 字段），按左闭右开区间过滤（下界含、上界不含）。
+    /// Stats projection: only aggregation columns (no request_body field), filtered by a half-open range
+    /// (lower inclusive, upper exclusive).
     #[tokio::test]
     async fn stat_rows_projects_within_half_open_range() {
         let repo = new_repo().await;
@@ -833,7 +839,7 @@ mod tests {
         assert_eq!(row.created_at, utc("2026-01-15T12:00:00Z"));
     }
 
-    /// 统计投影：无时间范围时返回全部日志行。
+    /// Stats projection: with no time range, all log rows are returned.
     #[tokio::test]
     async fn stat_rows_without_range_returns_all_rows() {
         let repo = new_repo().await;

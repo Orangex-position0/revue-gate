@@ -1,9 +1,10 @@
-//! 数据面：Axum 路由树 + trace 贯穿层（见 docs/Architecture-backend.md）。
+//! Data plane: Axum route tree + trace propagation layer (see docs/Architecture-backend.md).
 //!
-//! `/v1/*` 路由挂载到 `AppState`（真实用例），`/health` 为静态探活端点。
-//! 中间件顺序（最外层在前）：`trace_id_middleware`（生成/沿用 x-request-id）→
-//! `TraceLayer`（span 携带 trace_id + 响应后结构化日志）。layer 调用顺序与包裹顺序相反：
-//! 后添加的 layer 在外层，故 trace_id_middleware 最后添加（先生成 trace id，span 才能读到）。
+//! `/v1/*` routes mount onto `AppState` (real usecases); `/health` is a static liveness endpoint.
+//! Middleware order (outermost first): `trace_id_middleware` (generate/reuse x-request-id) →
+//! `TraceLayer` (span carries trace_id + structured logs after the response). Layer call order is
+//! the reverse of wrapping order: later layers are outer, so trace_id_middleware is added last
+//! (the trace id is generated first so the span can read it).
 
 use axum::Router;
 use axum::middleware::from_fn;
@@ -14,7 +15,7 @@ use super::handlers::{
     AppState, TraceIdSpan, TraceOnResponse, chat_completions, models, trace_id_middleware,
 };
 
-/// 组装数据面路由树：/health + /v1/chat/completions + /v1/models，并挂 trace 贯穿层。
+/// Build the data-plane route tree: /health + /v1/chat/completions + /v1/models, with the trace propagation layer attached.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -29,7 +30,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(from_fn(trace_id_middleware))
 }
 
-/// 健康检查：返回 200 与 `{"status":"ok"}`，供客户端确认网关在线。
+/// Health check: returns 200 with `{"status":"ok"}` so clients can confirm the gateway is online.
 async fn health() -> axum::Json<Health> {
     axum::Json(Health { status: "ok" })
 }
@@ -58,7 +59,7 @@ mod tests {
     };
     use crate::usecases::proxy::ProxyRequestUsecase;
 
-    /// 最小 AppState：内存仓储 + 不会被调用的 stub 适配器（/health 与 404 不触发转发）。
+    /// Minimal AppState: in-memory repositories + a stub adapter that is never called (/health and 404 do not trigger forwarding).
     fn minimal_state() -> AppState {
         let keys: Arc<dyn ApiKeyRepository> = Arc::new(InMemoryApiKeyRepository::new());
         let channels: Arc<dyn ChannelRepository> = Arc::new(InMemoryChannelRepository::new());
@@ -84,7 +85,7 @@ mod tests {
         }
     }
 
-    /// seam B：`/health` 应返回 200 OK（oneshot 集成测试，不启真实端口）。
+    /// seam B: `/health` should return 200 OK (oneshot integration test, no real port bound).
     #[tokio::test]
     async fn health_returns_200() {
         let app = build_router(minimal_state());
@@ -100,7 +101,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// seam B：未知路由应返回 404。
+    /// seam B: unknown routes should return 404.
     #[tokio::test]
     async fn unknown_route_returns_404() {
         let app = build_router(minimal_state());

@@ -1,4 +1,4 @@
-//! 数据面：Axum HTTP 网关（router + handlers + server 生命周期）。
+//! Data plane: Axum HTTP gateway (router + handlers + server lifecycle).
 
 pub mod handlers;
 pub mod router;

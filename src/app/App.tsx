@@ -1,4 +1,4 @@
-// 应用根组件：Layout 包 5 个页面路由（薄壳）。路由集中定义于此，不做业务逻辑与启动副作用。
+// Root app component: Layout wrapping 5 page routes (thin shell). Routes are defined here; no business logic or startup side effects.
 import { MemoryRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { ApiKeysPage } from "@/pages/api-keys/ApiKeysPage";

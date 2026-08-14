@@ -1,8 +1,8 @@
-//! 控制面：渠道管理命令（list / create / update / delete / set_enabled / test）。
+//! Control plane: channel management commands (list / create / update / delete / set_enabled / test).
 //!
-//! 命令是薄胶水：解析入参 → 调 usecases → 返回。返回前统一遮蔽上游密钥
-//! （`mask_api_key`），保证控制面任何路径都不把上游密钥回显给前端
-//! （红线见 docs/Spec-implementation.md「上游密钥安全」）。
+//! Commands are thin glue: parse input → call usecases → return. Before returning, the upstream key is
+//! uniformly masked (`mask_api_key`), so no control-plane path echoes the upstream key to the frontend
+//! (red line: docs/Spec-implementation.md, "Upstream Key Security").
 
 use tauri::State;
 use uuid::Uuid;
@@ -15,7 +15,7 @@ use crate::usecases::channel::{
     ListChannelsUsecase, SetChannelEnabledUsecase, TestChannelUsecase, UpdateChannelUsecase,
 };
 
-/// 列出全部渠道（按优先级升序；上游密钥遮蔽）。
+/// List all channels (sorted by priority ascending; upstream keys masked).
 #[tauri::command]
 pub async fn list_channels(
     repo: State<'_, SqliteChannelRepository>,
@@ -27,7 +27,7 @@ pub async fn list_channels(
     Ok(channels.into_iter().map(mask_api_key).collect())
 }
 
-/// 创建渠道并返回（上游密钥遮蔽）。
+/// Create a channel and return it (upstream key masked).
 #[tauri::command]
 pub async fn create_channel(
     repo: State<'_, SqliteChannelRepository>,
@@ -40,7 +40,7 @@ pub async fn create_channel(
     Ok(mask_api_key(channel))
 }
 
-/// 更新渠道并返回（上游密钥遮蔽；`input.api_key` 为空 = 保持原值）。
+/// Update a channel and return it (upstream key masked; empty `input.api_key` = keep the original value).
 #[tauri::command]
 pub async fn update_channel(
     repo: State<'_, SqliteChannelRepository>,
@@ -55,7 +55,7 @@ pub async fn update_channel(
     Ok(mask_api_key(channel))
 }
 
-/// 删除渠道。
+/// Delete a channel.
 #[tauri::command]
 pub async fn delete_channel(
     repo: State<'_, SqliteChannelRepository>,
@@ -68,7 +68,7 @@ pub async fn delete_channel(
         .map_err(|e| e.to_string())
 }
 
-/// 启停渠道并返回（上游密钥遮蔽）。
+/// Enable/disable a channel and return it (upstream key masked).
 #[tauri::command]
 pub async fn set_channel_enabled(
     repo: State<'_, SqliteChannelRepository>,
@@ -83,8 +83,9 @@ pub async fn set_channel_enabled(
     Ok(mask_api_key(channel))
 }
 
-/// 渠道连通性测试：按 id 取渠道解析适配器，调用上游模型列表接口并持久化结果。
-/// 适配器解析用「当前已存的渠道类型」，用例内部重新取最新渠道执行，回显测试结果。
+/// Channel connectivity test: resolve the adapter for the channel by id, call the upstream model list
+/// endpoint, and persist the result. The adapter is resolved by the currently stored channel type;
+/// the usecase re-fetches the latest channel internally and echoes the test result.
 #[tauri::command]
 pub async fn test_channel(
     repo: State<'_, SqliteChannelRepository>,
@@ -103,7 +104,7 @@ pub async fn test_channel(
         .map_err(|e| e.to_string())
 }
 
-/// 遮蔽上游密钥：返回给前端的渠道不携带 `api_key`。
+/// Mask the upstream key: channels returned to the frontend never carry `api_key`.
 fn mask_api_key(mut channel: Channel) -> Channel {
     channel.api_key = None;
     channel
@@ -114,7 +115,7 @@ mod tests {
     use super::mask_api_key;
     use crate::test_support::sample_channel;
 
-    /// 遮蔽后 `api_key` 恒为 None：控制面不向上游密钥回显给前端。
+    /// After masking, `api_key` is always None: the control plane never echoes the upstream key to the frontend.
     #[test]
     fn mask_api_key_clears_upstream_key() {
         let channel = sample_channel();

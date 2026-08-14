@@ -1,15 +1,15 @@
-//! 模型列表用例：`/v1/models` —— 所有启用渠道的模型合并去重，禁用渠道剔除。
+//! Model list use case: `/v1/models` — merge and dedup models across enabled channels, excluding disabled channels.
 //!
-//! 数据面契约（docs/Requirements.md）：启用渠道的 `models` 与 `model_mappings.client_model`
-//! 合并，去重保序（客户端据此选模型名，映射名同样可路由），禁用渠道不参与；不按密钥过滤。
-//! `list_models` 为纯函数，便于与 `ChannelSelector` 保持「列表中的模型必可被选中」的一致。
+//! Data-plane contract (docs/Requirements.md): enabled channels' `models` and `model_mappings.client_model`
+//! are merged, deduped while preserving order (the client picks model names from this; mapped names are also routable), disabled channels do not participate; no key-based filtering.
+//! `list_models` is a pure function, keeping it consistent with `ChannelSelector`'s "models in the list must be selectable".
 
 use std::collections::HashSet;
 
 use crate::domain::channel::{Channel, ChannelRepository};
 use crate::domain::error::RepositoryError;
 
-/// 模型列表用例：读取全部渠道并按启用渠道合并去重。
+/// Model list use case: read all channels and merge with dedup across enabled channels.
 pub struct ListModelsUsecase;
 impl ListModelsUsecase {
     pub async fn execute(
@@ -21,7 +21,7 @@ impl ListModelsUsecase {
     }
 }
 
-/// 纯函数：启用渠道的模型合并去重（保留首次出现顺序）；禁用渠道被剔除。
+/// Pure function: merge models of enabled channels with dedup (keeping first-occurrence order); disabled channels are excluded.
 pub fn list_models(channels: &[Channel]) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut models = Vec::new();
@@ -63,7 +63,7 @@ mod tests {
         c
     }
 
-    /// 多启用渠道的模型合并去重，保序（首次出现位置）。
+    /// Models across multiple enabled channels are merged and deduped, preserving order (first-occurrence position).
     #[test]
     fn merges_models_across_enabled_channels_and_dedupes() {
         let channels = vec![
@@ -76,7 +76,7 @@ mod tests {
         );
     }
 
-    /// 映射的 `client_model` 也是可用模型名（客户端可路由）。
+    /// A mapped `client_model` is also an available model name (routable by the client).
     #[test]
     fn includes_mapping_client_models() {
         let mut c = mapped_channel("chat");
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(list_models(&[c]), vec!["gpt-4o", "chat"]);
     }
 
-    /// 禁用渠道的模型被剔除。
+    /// Models of disabled channels are excluded.
     #[test]
     fn excludes_disabled_channels() {
         let channels = vec![
@@ -94,7 +94,7 @@ mod tests {
         assert_eq!(list_models(&channels), vec!["gpt-4o"]);
     }
 
-    /// 无启用渠道 → 空列表。
+    /// No enabled channels → empty list.
     #[test]
     fn empty_when_no_enabled_channels() {
         let channels = vec![channel("off", &["gpt-4o"], false)];
@@ -102,7 +102,7 @@ mod tests {
         assert!(list_models(&[]).is_empty());
     }
 
-    /// 用例层：仓储读取 + 合并去重端到端（seam A mock）。
+    /// Use case layer: repository read + merge dedup end to end (seam A mock).
     #[tokio::test]
     async fn usecase_lists_models_via_repository() {
         let repo = InMemoryChannelRepository::new();

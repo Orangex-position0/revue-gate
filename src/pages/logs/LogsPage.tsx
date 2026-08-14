@@ -1,5 +1,5 @@
-// 请求日志页：分页 + 多条件筛选 / 详情查看 / 按日期前删除 / 清空全部（ticket 10）。
-// 数据本地 useState + load()，操作后就地刷新（见 Architecture-frontend.md「业务数据不进 store」）。
+// Request logs page: pagination + multi-criteria filters / detail view / delete-before-date / clear all (ticket 10).
+// Data is local useState + load(), refreshed in place after actions (see Architecture-frontend.md "business data does not go into the store").
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   CalendarX,
@@ -19,31 +19,31 @@ const inputCls =
 const labelCls = "block text-xs font-medium text-muted-foreground";
 const cellCls = "px-3 py-2 align-middle text-sm";
 
-/** 本地时区某日零点 → ISO-8601 UTC：日期筛选统一按「本地日界」半开区间（见 date-handling 规范）。 */
+/** Local-timezone midnight of a day → ISO-8601 UTC: date filters consistently use a half-open interval at the local day boundary (see the date-handling rules). */
 function localDayStartIso(dateStr: string): string {
   return new Date(`${dateStr}T00:00:00`).toISOString();
 }
 
-/** 本地时区某日次日的零点 → ISO-8601 UTC：结束日期筛选的右开上界（含所选整天，`[startDay, endDay+1day)`）。 */
+/** Local-timezone midnight of the day after → ISO-8601 UTC: the exclusive upper bound for the end-date filter (includes the whole selected day, `[startDay, endDay+1day)`). */
 function localDayAfterIso(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00`);
   d.setDate(d.getDate() + 1);
   return d.toISOString();
 }
 
-/** 时间显示为本地时区短格式（后端存 UTC ISO-8601）。 */
+/** Time shown in a short local-timezone format (the backend stores UTC ISO-8601). */
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
-/** 状态码着色：2xx 成功 / 4xx-5xx 错误 / 其余中性。 */
+/** Status-code coloring: 2xx success / 4xx-5xx error / neutral otherwise. */
 function statusCls(code: number): string {
   if (code >= 200 && code < 300) return "bg-success/10 text-success";
   if (code >= 400) return "bg-danger/10 text-danger";
   return "bg-accent text-accent-foreground";
 }
 
-/** 请求体 JSON 美化：可解析则格式化，否则原样展示。 */
+/** Pretty-print request-body JSON: format when parseable, otherwise show as-is. */
 function prettyJson(value: unknown): string {
   try {
     return JSON.stringify(
@@ -56,7 +56,7 @@ function prettyJson(value: unknown): string {
   }
 }
 
-/** 小徽标：流式 / 重试等布尔状态。 */
+/** Tiny badge: boolean states such as streaming / retry. */
 function TinyBadge({ label }: { label: string }) {
   return (
     <span className="rounded bg-accent px-1.5 py-0.5 text-xs text-accent-foreground">
@@ -65,7 +65,7 @@ function TinyBadge({ label }: { label: string }) {
   );
 }
 
-/** 日志详情弹窗：路由 / usage / 对话构成 / 请求参数 / 工具标签 / 原始 JSON。 */
+/** Log detail modal: route / usage / conversation / request params / tool tags / raw JSON. */
 interface LogDetailModalProps {
   detail: LogDetail;
   onClose: () => void;
@@ -105,7 +105,7 @@ function LogDetailModal({
           </button>
         </div>
 
-        {/* 路由 / 元信息 */}
+        {/* Route / metadata */}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
           <Field k="创建时间" v={formatTime(detail.createdAt)} />
           <Field k="Trace ID" v={detail.traceId} mono />
@@ -147,7 +147,7 @@ function LogDetailModal({
           )}
         </dl>
 
-        {/* 对话构成 */}
+        {/* Conversation */}
         <section className="mt-5">
           <h4 className="mb-2 text-sm font-semibold">对话构成</h4>
           {detail.conversation.length === 0 ? (
@@ -176,7 +176,7 @@ function LogDetailModal({
           )}
         </section>
 
-        {/* 工具标签 + 请求参数 */}
+        {/* Tool tags + request params */}
         <section className="mt-5 space-y-4">
           <div>
             <h4 className="mb-2 text-sm font-semibold">工具</h4>
@@ -216,7 +216,7 @@ function LogDetailModal({
   );
 }
 
-/** 详情弹窗的标签/值行。 */
+/** Label/value row for the detail modal. */
 function Field({ k, v, mono = false }: { k: string; v: string; mono?: boolean }) {
   return (
     <div className={mono ? "truncate font-mono text-xs leading-5" : ""}>
@@ -234,7 +234,7 @@ export function LogsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // 筛选表单（输入态）与已提交筛选（驱动查询）。
+  // Filter form (input state) and submitted filters (drive the query).
   const [keyword, setKeyword] = useState("");
   const [model, setModel] = useState("");
   const [apiKeyId, setApiKeyId] = useState("");
@@ -242,16 +242,16 @@ export function LogsPage() {
   const [startAt, setStartAt] = useState("");
   const [endAt, setEndAt] = useState("");
   const [filters, setFilters] = useState<LogQuery>({});
-  // 删除/清空后强制重新加载（setPage 可能为 no-op，需独立触发一次刷新）。
+  // Force a reload after delete/clear (setPage may be a no-op, so a separate refresh trigger is needed).
   const [refresh, setRefresh] = useState(0);
 
-  // 下拉选项：密钥 / 渠道（同时用于详情反查名称；实体可能被删，缺失时回退 id 前缀）。
+  // Dropdown options: keys / channels (also used to look up names in the detail; an entity may be deleted, so fall back to an id prefix when missing).
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [channels, setChannels] = useState<Channel[]>([]);
 
-  // 删除操作：按日期前删除 + 清空全部。
+  // Delete actions: delete before a date + clear all.
   const [deleteBeforeDate, setDeleteBeforeDate] = useState("");
-  // 详情弹窗。
+  // Detail modal.
   const [detail, setDetail] = useState<LogDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -259,7 +259,7 @@ export function LogsPage() {
     setLoading(true);
     try {
       const result = await logApi.list(filters, page, pageSize);
-      // 删除后当前页可能越界：非首页且该页为空但有总数 → 跳到最后一页。
+      // After a delete the current page may be out of range: if not the first page and the page is empty but a total exists, jump to the last page.
       if (result.items.length === 0 && page > 1 && result.total > 0) {
         setPage(Math.min(page, Math.ceil(result.total / pageSize)));
         return;
@@ -278,13 +278,13 @@ export function LogsPage() {
     void load();
   }, [load]);
 
-  // 下拉选项数据只拉一次（实体列表低频变化，重拉零成本但无需每页刷新）。
+  // Dropdown option data is fetched once (entity lists change infrequently; re-fetching is cheap but not needed per page).
   useEffect(() => {
     void apiKeyApi.list().then(setKeys).catch(() => {});
     void channelApi.list().then(setChannels).catch(() => {});
   }, []);
 
-  /** 提交筛选：跳回第一页并提交新的 LogQuery。 */
+  /** Submit filters: jump back to page 1 and submit a new LogQuery. */
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPage(1);
@@ -294,12 +294,12 @@ export function LogsPage() {
       channelId: channelId || null,
       model: model.trim() || null,
       startAt: startAt ? localDayStartIso(startAt) : null,
-      // 结束日期取「次日零点」作右开上界，保证所选整天都在区间内。
+      // The end date uses "midnight of the next day" as the exclusive upper bound, ensuring the whole selected day is inside the interval.
       endAt: endAt ? localDayAfterIso(endAt) : null,
     });
   }
 
-  /** 重置筛选表单并回到无过滤第一页。 */
+  /** Reset the filter form and return to page 1 with no filters. */
   function handleReset() {
     setKeyword("");
     setModel("");
@@ -311,7 +311,7 @@ export function LogsPage() {
     setFilters({});
   }
 
-  /** 删除早于所选日期的日志（不含当天，半开 [.., dayStart)）。 */
+  /** Delete logs before the selected date (excluding that day, half-open [.., dayStart)). */
   async function handleDeleteBefore() {
     if (!deleteBeforeDate) return;
     const before = localDayStartIso(deleteBeforeDate);
@@ -333,7 +333,7 @@ export function LogsPage() {
     }
   }
 
-  /** 清空全部日志。 */
+  /** Clear all logs. */
   async function handleClear() {
     if (
       !window.confirm("确定清空全部请求日志？此操作不可撤销。")
@@ -350,7 +350,7 @@ export function LogsPage() {
     }
   }
 
-  /** 打开详情弹窗。 */
+  /** Open the detail modal. */
   async function handleDetail(id: string) {
     setDetailLoading(true);
     try {
@@ -381,7 +381,7 @@ export function LogsPage() {
         <span className="text-sm text-muted-foreground">共 {total} 条记录</span>
       </div>
 
-      {/* 筛选 + 删除工具栏 */}
+      {/* Filter + delete toolbar */}
       <form
         onSubmit={handleSearch}
         className="space-y-3 rounded-lg border border-border bg-card p-3"
@@ -629,7 +629,7 @@ export function LogsPage() {
         </table>
       </div>
 
-      {/* 分页 */}
+      {/* Pagination */}
       <div className="flex items-center justify-between text-sm">
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">每页</span>

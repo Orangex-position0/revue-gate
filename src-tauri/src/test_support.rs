@@ -1,7 +1,7 @@
-//! 测试支撑：seam A 的内存 mock 仓储实现（仅测试编译）。
+//! Test support: in-memory mock repository implementations for seam A (test-only compilation).
 //!
-//! 供 usecases 编排测试引用（`crate::test_support::*`）：对 domain 的 Repository trait
-//! 提供内存实现，行为可控、无真实 DB。domain 纯逻辑经这些用例被覆盖（见 Spec §Testing）。
+//! Referenced by usecases orchestration tests (`crate::test_support::*`): in-memory implementations of the domain
+//! Repository traits with controllable behavior and no real DB. Pure domain logic is covered through these usecases (see Spec §Testing).
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -19,7 +19,7 @@ use crate::domain::provider::{
 use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
 use crate::domain::settings::{GatewaySettings, SettingsRepository};
 
-/// 构造一条最小 Channel 测试样本（供各层测试复用）。
+/// Build a minimal Channel test sample (reused across layers).
 pub(crate) fn sample_channel() -> Channel {
     Channel {
         id: Uuid::now_v7(),
@@ -39,7 +39,7 @@ pub(crate) fn sample_channel() -> Channel {
     }
 }
 
-/// 内存版 ChannelRepository：以 Vec<Channel> 为后端，upsert 语义的 save。
+/// In-memory ChannelRepository: backed by a Vec<Channel>, save with upsert semantics.
 #[derive(Default)]
 pub struct InMemoryChannelRepository {
     channels: RwLock<Vec<Channel>>,
@@ -88,9 +88,9 @@ impl ChannelRepository for InMemoryChannelRepository {
     }
 }
 
-/// 构造一条最小 ApiKey 测试样本（供各层测试复用）。
-/// key 由随机 uuid v4 派生（全随机 32 hex，取前 16 位），保证每次调用唯一
-/// （api_keys.key 列 UNIQUE）。不用 v7：其前 12 位 hex 为毫秒时间戳，同毫秒调用会碰撞。
+/// Build a minimal ApiKey test sample (reused across layers).
+/// The key derives from a random uuid v4 (all-random 32 hex, first 16 chars taken), unique per call
+/// (api_keys.key column is UNIQUE). v7 is not used: its first 12 hex chars are a millisecond timestamp, so same-millisecond calls collide.
 pub(crate) fn sample_api_key() -> ApiKey {
     let hex: String = Uuid::new_v4().simple().to_string()[..16].to_string();
     ApiKey {
@@ -107,7 +107,7 @@ pub(crate) fn sample_api_key() -> ApiKey {
     }
 }
 
-/// 构造一条最小 RequestLog 测试样本（供各层测试复用，字段多为可选空值）。
+/// Build a minimal RequestLog test sample (reused across layers; most fields are optional/empty).
 pub(crate) fn sample_request_log() -> RequestLog {
     RequestLog {
         id: Uuid::now_v7(),
@@ -129,7 +129,7 @@ pub(crate) fn sample_request_log() -> RequestLog {
     }
 }
 
-/// 内存版 ApiKeyRepository：以 Vec<ApiKey> 为后端，upsert 语义的 save。
+/// In-memory ApiKeyRepository: backed by a Vec<ApiKey>, save with upsert semantics.
 #[derive(Default)]
 pub struct InMemoryApiKeyRepository {
     api_keys: RwLock<Vec<ApiKey>>,
@@ -188,7 +188,7 @@ impl ApiKeyRepository for InMemoryApiKeyRepository {
     }
 }
 
-/// 内存版 RequestLogRepository：以 Vec<RequestLog> 为后端，append 语义的 save。
+/// In-memory RequestLogRepository: backed by a Vec<RequestLog>, save with append semantics.
 #[derive(Default)]
 pub struct InMemoryRequestLogRepository {
     logs: RwLock<Vec<RequestLog>>,
@@ -217,8 +217,8 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
             .cloned())
     }
 
-    /// 分页查询：复用 `LogQuery::matches`（领域层权威筛选语义），与 SQL 实现行为一致。
-    /// 排序与 SQL 侧对齐：created_at 倒序、同时间 id 倒序兜底。
+    /// Paginated query: reuses `LogQuery::matches` (authoritative domain-level filtering), consistent with the SQL implementation.
+    /// Sorting aligns with the SQL side: created_at descending, id descending as a tie-breaker.
     async fn query(
         &self,
         query: &LogQuery,
@@ -239,7 +239,7 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
         Ok(LogPage { items, total })
     }
 
-    /// 删除创建时间严格早于 `before` 的日志（保留 `>= before`）。
+    /// Delete logs whose created_at is strictly earlier than `before` (keep `>= before`).
     async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, RepositoryError> {
         let mut guard = self.logs.write().unwrap();
         let before_len = guard.len();
@@ -247,7 +247,7 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
         Ok((before_len - guard.len()) as u64)
     }
 
-    /// 清空全部日志。
+    /// Clear all logs.
     async fn clear(&self) -> Result<u64, RepositoryError> {
         let mut guard = self.logs.write().unwrap();
         let n = guard.len() as u64;
@@ -255,7 +255,7 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
         Ok(n)
     }
 
-    /// 统计投影：复用左闭右开区间语义（与 sqlx 实现一致），返回轻量行（不含请求体）。
+    /// Stats projection: reuses half-open interval semantics (consistent with the sqlx implementation); returns lightweight rows (no request body).
     async fn stat_rows(
         &self,
         start_at: Option<DateTime<Utc>>,
@@ -278,8 +278,8 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
     }
 }
 
-/// 内存版 SettingsRepository：以 `Option<GatewaySettings>` 为后端。
-/// `load` 无值时返回默认设置（与 sqlx 实现在文件缺失时的行为一致）；`save` 覆盖存储。
+/// In-memory SettingsRepository: backed by `Option<GatewaySettings>`.
+/// `load` returns defaults when empty (consistent with the sqlx implementation on a missing file); `save` overwrites.
 #[derive(Default)]
 pub struct InMemorySettingsRepository {
     settings: RwLock<Option<GatewaySettings>>,
@@ -303,8 +303,8 @@ impl SettingsRepository for InMemorySettingsRepository {
     }
 }
 
-/// 取仓储当前全部日志：`RequestLogRepository::list()` 已移除（无界读取），
-/// 测试需要全量断言时改经 `query` 全量分页（LIMIT 拉满，语义等价）。
+/// Fetch all logs currently in the repository: `RequestLogRepository::list()` was removed (unbounded read);
+/// tests that need a full assertion should page through `query` with an unbounded LIMIT instead (equivalent semantics).
 pub(crate) async fn all_request_logs(repo: &dyn RequestLogRepository) -> Vec<RequestLog> {
     repo.query(&LogQuery::default(), 1, u64::MAX)
         .await
@@ -312,16 +312,16 @@ pub(crate) async fn all_request_logs(repo: &dyn RequestLogRepository) -> Vec<Req
         .items
 }
 
-/// 内存版 ProviderAdaptor：`test()` 返回预设结果（成功 / 失败 / 配置错误），供 test_channel 用例测试。
-/// `forward` / `forward_stream` 不参与 test-channel 编排，返回配置错误占位。
+/// In-memory ProviderAdaptor: `test()` returns a preset result (success / failure / config error) for the test_channel usecase.
+/// `forward` / `forward_stream` do not participate in test-channel orchestration and return a config-error placeholder.
 pub struct MockProviderAdaptor {
     result: TestResult,
-    /// Some → `test()` 返回配置错误（模拟缺 api_key / base_url）。
+    /// Some → `test()` returns a config error (simulates a missing api_key / base_url).
     error: Option<String>,
 }
 
 impl MockProviderAdaptor {
-    /// 预设一次成功的连通性测试结果。
+    /// Preset a successful connectivity test result.
     pub fn new(result: TestResult) -> Self {
         Self {
             result,
@@ -329,7 +329,7 @@ impl MockProviderAdaptor {
         }
     }
 
-    /// 预设 `test()` 返回配置错误（如「api key is required」）。
+    /// Preset `test()` to return a config error (e.g. "api key is required").
     pub fn not_configured(reason: &str) -> Self {
         Self {
             result: TestResult {
@@ -384,20 +384,20 @@ impl ProviderAdaptor for MockProviderAdaptor {
     }
 }
 
-/// 脚本化转发 mock：`forward` / `forward_stream` 按预设结果返回，供代理用例（proxy.rs）seam A 测试。
-/// 每次调用把收到的 `ChatRequest` 记入共享 recorder（测试侧持 Arc，可事后断言请求体/映射）。
-/// `forward` 返回 `Ok(status>=500 / 429)` 或 `Err` 即模拟一次「失败」以驱动重试。
+/// Scripted forwarding mock: `forward` / `forward_stream` return preset results for seam A tests of the proxy usecase (proxy.rs).
+/// Each call records the received `ChatRequest` into a shared recorder (the test side holds an Arc and can assert request bodies/mappings afterwards).
+/// A `forward` returning `Ok(status >= 500 / 429)` or `Err` simulates one "failure" to drive retry.
 pub struct MockForwardAdaptor {
-    /// 非流式转发脚本结果。
+    /// Scripted result for non-streaming forward.
     forward: Result<ProviderResponse, ProviderError>,
-    /// 流式转发脚本结果：`Err` 表示打开流失败；`Ok(events)` 为逐帧事件序列。
+    /// Scripted result for streaming forward: `Err` means opening the stream failed; `Ok(events)` is the per-frame event sequence.
     stream: Result<Vec<Result<StreamEvent, ProviderError>>, ProviderError>,
-    /// 收到的转发请求（forward 与 forward_stream 共用，按调用顺序追加）。
+    /// Received forwarding requests (shared by forward and forward_stream, appended in call order).
     pub received: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
 impl MockForwardAdaptor {
-    /// 构造：非流式 / 流式脚本各自指定。
+    /// Construct with separate non-streaming / streaming scripts.
     pub fn new(
         forward: Result<ProviderResponse, ProviderError>,
         stream: Result<Vec<Result<StreamEvent, ProviderError>>, ProviderError>,
@@ -409,7 +409,7 @@ impl MockForwardAdaptor {
         }
     }
 
-    /// 用共享 recorder 构造（测试侧可事后断言请求体）。
+    /// Construct with a shared recorder (the test side can assert request bodies afterwards).
     pub fn with_recorder(
         received: Arc<Mutex<Vec<ChatRequest>>>,
         forward: Result<ProviderResponse, ProviderError>,
@@ -473,8 +473,8 @@ mod tests {
 
     use super::*;
 
-    /// seam A 验证：内存 ChannelRepository 可被引用为 `Box<dyn ChannelRepository>`
-    /// （编译通过）并具备基本 CRUD 行为。
+    /// seam A verification: the in-memory ChannelRepository can be referenced as `Box<dyn ChannelRepository>`
+    /// (compiles) and has basic CRUD behavior.
     #[tokio::test]
     async fn channel_repository_mock_is_referenceable_as_trait_object() {
         let repo: Box<dyn ChannelRepository> = Box::new(InMemoryChannelRepository::new());
@@ -494,7 +494,7 @@ mod tests {
         );
     }
 
-    /// seam A 验证：内存 ApiKeyRepository 可被引用为 trait object 并完成保存/查找。
+    /// seam A verification: the in-memory ApiKeyRepository can be referenced as a trait object and performs save/find.
     #[tokio::test]
     async fn api_key_repository_mock_is_referenceable_as_trait_object() {
         let repo: Box<dyn ApiKeyRepository> = Box::new(InMemoryApiKeyRepository::new());
@@ -521,7 +521,7 @@ mod tests {
         );
     }
 
-    /// seam A 验证：内存 RequestLogRepository 可被引用为 trait object 并完成追加/查找。
+    /// seam A verification: the in-memory RequestLogRepository can be referenced as a trait object and performs append/find.
     #[tokio::test]
     async fn request_log_repository_mock_is_referenceable_as_trait_object() {
         let repo: Box<dyn RequestLogRepository> = Box::new(InMemoryRequestLogRepository::new());
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(all_request_logs(&*repo).await.len(), 1);
     }
 
-    /// seam A 验证：内存 SettingsRepository 可被引用为 trait object；无值返回默认、保存后可回读。
+    /// seam A verification: the in-memory SettingsRepository can be referenced as a trait object; returns defaults when empty, readable back after save.
     #[tokio::test]
     async fn settings_repository_mock_is_referenceable_as_trait_object() {
         let repo: Box<dyn SettingsRepository> = Box::new(InMemorySettingsRepository::new());

@@ -1,4 +1,4 @@
-// 侧边栏：品牌区 + 主导航项（NavLink 高亮当前路由）。
+// Sidebar: brand area + primary nav items (NavLink highlights the active route).
 import { NavLink } from "react-router-dom";
 import { APP_NAME } from "@/lib/constants";
 import { NAV_ITEMS } from "./nav";

@@ -1,8 +1,8 @@
-//! SQLite 渠道仓储实现：`ChannelRepository` trait 的 sqlx 落地。
+//! SQLite channel repository implementation: the sqlx implementation of the `ChannelRepository` trait.
 //!
-//! 非 JSON 列直接映射；`models` / `model_mappings` 以 JSON TEXT 存储，读写时手动编解码
-//! （SQLite 无原生数组类型）。`delete` 未命中返回 `RepositoryError::NotFound`，与
-//! usecases 的 NotFound 语义对齐。
+//! Non-JSON columns map directly; `models` / `model_mappings` are stored as JSON TEXT and manually encoded/decoded
+//! on read/write (SQLite has no native array type). A missed `delete` returns `RepositoryError::NotFound`, aligned
+//! with the NotFound semantics in usecases.
 
 use std::str::FromStr;
 
@@ -14,8 +14,8 @@ use uuid::Uuid;
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
 use crate::domain::error::RepositoryError;
 
-/// 渠道表行映射：与 `migrations/001_init.sql` 的 channels 列一一对应。
-/// JSON 列先读为 String，再由 `TryFrom` 解析（避免 sqlx 不支持的数组类型）。
+/// Row mapping for the channel table: one-to-one with the channels columns in `migrations/001_init.sql`.
+/// JSON columns are read as String first, then parsed by `TryFrom` (avoiding array types unsupported by sqlx).
 #[derive(FromRow)]
 struct ChannelDb {
     id: String,
@@ -34,11 +34,11 @@ struct ChannelDb {
     updated_at: String,
 }
 
-/// 查询列清单（各查询共用，避免重复书写）。
+/// SELECT column list (shared by all queries to avoid repetition).
 const SELECT_COLUMNS: &str = "id, name, channel_type, base_url, api_key, models, priority, \
      weight, model_mappings, enabled, last_test_at, last_test_ok, created_at, updated_at";
 
-/// 基于 sqlx 连接池的 ChannelRepository 实现。
+/// ChannelRepository implementation backed by an sqlx pool.
 pub struct SqliteChannelRepository {
     pool: SqlitePool,
 }
@@ -62,7 +62,7 @@ impl ChannelRepository for SqliteChannelRepository {
         row.map(Channel::try_from).transpose()
     }
 
-    /// 列出全部渠道，按「优先级升序 → 名称升序」排序（调度视图的稳定顺序）。
+    /// Lists all channels, ordered by "priority ASC → name ASC" (a stable order for the routing view).
     async fn list(&self) -> Result<Vec<Channel>, RepositoryError> {
         let rows: Vec<ChannelDb> = sqlx::query_as(&format!(
             "SELECT {SELECT_COLUMNS} FROM channels ORDER BY priority ASC, name ASC"
@@ -73,7 +73,7 @@ impl ChannelRepository for SqliteChannelRepository {
         rows.into_iter().map(Channel::try_from).collect()
     }
 
-    /// upsert 语义：存在同 id 行则覆盖，否则插入。
+    /// Upsert semantics: overwrite when a row with the same id exists, otherwise insert.
     async fn save(&self, channel: &Channel) -> Result<(), RepositoryError> {
         let models = serde_json::to_string(&channel.models).map_err(json_err)?;
         let mappings = serde_json::to_string(&channel.model_mappings).map_err(json_err)?;
@@ -109,7 +109,7 @@ impl ChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    /// 删除渠道；未命中（0 行受影响）返回 `NotFound`。
+    /// Deletes a channel; a miss (0 rows affected) returns `NotFound`.
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError> {
         let result = sqlx::query("DELETE FROM channels WHERE id = ?")
             .bind(id.to_string())
@@ -152,7 +152,7 @@ impl TryFrom<ChannelDb> for Channel {
     }
 }
 
-/// 渠道类型 ↔ 库内字符串（与 `migrations/001_init.sql` 注释枚举一致）。
+/// Channel type ↔ stored string (consistent with the comment-enumerated values in `migrations/001_init.sql`).
 fn channel_type_to_str(t: ChannelType) -> &'static str {
     match t {
         ChannelType::OpenAi => "openai",
@@ -174,7 +174,7 @@ fn channel_type_from_str(s: &str) -> Option<ChannelType> {
     }
 }
 
-/// 解析库内 RFC3339 时间字符串为 `DateTime<Utc>`。
+/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
 fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -189,7 +189,7 @@ fn json_err(e: serde_json::Error) -> RepositoryError {
     RepositoryError::Database(format!("json encode error: {e}"))
 }
 
-/// 构造「行数据损坏」类错误：库内数据无法解析为领域模型。
+/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
 fn bad_row(reason: &str) -> RepositoryError {
     RepositoryError::Database(format!("invalid channel row: {reason}"))
 }
@@ -204,7 +204,7 @@ mod tests {
         SqliteChannelRepository::new(init_pool("sqlite::memory:").await.expect("init pool"))
     }
 
-    /// 构造含 JSON 列与可空列的渠道样本。
+    /// Builds a channel sample with JSON columns and nullable columns.
     fn sample() -> Channel {
         let mut c = crate::test_support::sample_channel();
         c.models = vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()];
@@ -215,7 +215,7 @@ mod tests {
         c
     }
 
-    /// 保存后按 id 找回：全部字段（含 JSON 列、可空列、布尔、时间）往返一致。
+    /// After save, find by id: all fields (JSON columns, nullable columns, booleans, timestamps) round-trip consistently.
     #[tokio::test]
     async fn save_then_find_roundtrips_all_fields() {
         let repo = new_repo().await;
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(found, channel);
     }
 
-    /// upsert：同 id 重复保存只覆盖不新增行。
+    /// Upsert: re-saving the same id overwrites without adding a row.
     #[tokio::test]
     async fn save_upserts_by_id_does_not_duplicate() {
         let repo = new_repo().await;
@@ -252,7 +252,7 @@ mod tests {
         assert!(!found.enabled);
     }
 
-    /// 排序：优先级升序优先，同级按名称升序。
+    /// Ordering: priority ascending first, then name ascending within the same priority.
     #[tokio::test]
     async fn list_orders_by_priority_then_name() {
         let repo = new_repo().await;
@@ -282,7 +282,7 @@ mod tests {
         );
     }
 
-    /// 删除：删除后查无此行；对缺失 id 再删返回 NotFound。
+    /// Delete: the row is gone after deletion; deleting a missing id again returns NotFound.
     #[tokio::test]
     async fn delete_removes_row_and_missing_errors() {
         let repo = new_repo().await;
@@ -301,7 +301,7 @@ mod tests {
         assert!(matches!(err, RepositoryError::NotFound));
     }
 
-    /// 5 类渠道类型全部可落库并读回。
+    /// All 5 channel types can be persisted and read back.
     #[tokio::test]
     async fn all_channel_types_roundtrip() {
         let repo = new_repo().await;

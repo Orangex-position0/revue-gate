@@ -1,4 +1,4 @@
-// Vite 构建配置：React + Tailwind 4 插件、@/ 路径别名、Tauri dev 固定端口与 HMR 参数。
+// Vite build config: React + Tailwind 4 plugins, @/ path alias, Tauri dev fixed port and HMR options.
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -12,7 +12,7 @@ export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      // 路径别名：@/ 指向 src/（tsconfig paths 同步配置）
+      // Path alias: @/ maps to src/ (mirrored in tsconfig paths)
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },

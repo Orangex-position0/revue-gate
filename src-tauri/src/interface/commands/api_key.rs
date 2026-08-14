@@ -1,9 +1,9 @@
-//! 控制面：密钥管理命令（list / create / update / delete / set_enabled）。
+//! Control plane: API key management commands (list / create / update / delete / set_enabled).
 //!
-//! 命令是薄胶水：解析入参 → 调 usecases → 返回。密钥明文只在 create 时返回一次
-//! （一次性展示），list / update / set_enabled 统一遮蔽为 `sk-revue-••••••••••••••••`
-//! 占位符，保证控制面任何路径都不把密钥明文回显给前端（红线见
-//! docs/Spec-implementation.md「密钥安全」）。
+//! Commands are thin glue: parse input → call usecases → return. Key plaintext is returned
+//! only once at create (one-time display); list / update / set_enabled uniformly mask it with the
+//! `sk-revue-••••••••••••••••` placeholder, so no control-plane path ever echoes the plaintext
+//! to the frontend (red line: docs/Spec-implementation.md, "API Key Security").
 
 use tauri::State;
 use uuid::Uuid;
@@ -15,10 +15,10 @@ use crate::usecases::api_key::{
     SetApiKeyEnabledUsecase, UpdateApiKeyUsecase,
 };
 
-/// 遮蔽后的密钥占位符（长度与真实密钥一致，避免 UI 抖动）。
+/// Masked key placeholder (same length as a real key to avoid UI layout shift).
 const MASKED_KEY: &str = "sk-revue-••••••••••••••••";
 
-/// 列出全部密钥（按名称升序；密钥遮蔽）。
+/// List all API keys (sorted by name ascending; keys masked).
 #[tauri::command]
 pub async fn list_api_keys(repo: State<'_, SqliteApiKeyRepository>) -> Result<Vec<ApiKey>, String> {
     let keys = ListApiKeysUsecase
@@ -28,7 +28,7 @@ pub async fn list_api_keys(repo: State<'_, SqliteApiKeyRepository>) -> Result<Ve
     Ok(keys.into_iter().map(mask_key).collect())
 }
 
-/// 创建密钥并返回完整明文（一次性展示，仅此路径下发明文）。
+/// Create an API key and return the full plaintext (one-time display; only this path returns plaintext).
 #[tauri::command]
 pub async fn create_api_key(
     repo: State<'_, SqliteApiKeyRepository>,
@@ -41,7 +41,7 @@ pub async fn create_api_key(
     Ok(key)
 }
 
-/// 更新密钥并返回（密钥遮蔽；密钥本身不可更新）。
+/// Update an API key and return it (masked; the key itself cannot be updated).
 #[tauri::command]
 pub async fn update_api_key(
     repo: State<'_, SqliteApiKeyRepository>,
@@ -56,7 +56,7 @@ pub async fn update_api_key(
     Ok(mask_key(key))
 }
 
-/// 删除密钥。
+/// Delete an API key.
 #[tauri::command]
 pub async fn delete_api_key(
     repo: State<'_, SqliteApiKeyRepository>,
@@ -69,7 +69,7 @@ pub async fn delete_api_key(
         .map_err(|e| e.to_string())
 }
 
-/// 启停密钥并返回（密钥遮蔽）。
+/// Enable/disable an API key and return it (masked).
 #[tauri::command]
 pub async fn set_api_key_enabled(
     repo: State<'_, SqliteApiKeyRepository>,
@@ -84,7 +84,7 @@ pub async fn set_api_key_enabled(
     Ok(mask_key(key))
 }
 
-/// 遮蔽密钥明文：返回给前端的密钥只保留 `sk-revue-` 前缀 + 占位符。
+/// Mask key plaintext: the key returned to the frontend keeps only the `sk-revue-` prefix + placeholder.
 fn mask_key(mut api_key: ApiKey) -> ApiKey {
     api_key.key = MASKED_KEY.to_string();
     api_key
@@ -95,7 +95,7 @@ mod tests {
     use super::mask_key;
     use crate::test_support::sample_api_key;
 
-    /// 遮蔽后 `key` 恒为占位符：控制面不向密钥明文回显给前端。
+    /// After masking, `key` is always the placeholder: the control plane never echoes key plaintext to the frontend.
     #[test]
     fn mask_key_clears_key_plaintext() {
         let key = sample_api_key();

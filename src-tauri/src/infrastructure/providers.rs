@@ -1,7 +1,7 @@
-//! 供应商适配器实现入口：按渠道类型解析适配器 + 各适配器共享的小工具。
+//! Provider adapter implementation entry: resolves the adapter by channel type + shared helpers.
 //!
-//! OpenAI / DeepSeek / Custom 共用 OpenAI-compatible 直通实现（openai.rs），Claude / Gemini
-//! 做协议转换（claude.rs / gemini.rs）。协议转换逻辑限定在本目录（见 Spec 决策 6）。
+//! OpenAI / DeepSeek / Custom share the OpenAI-compatible passthrough implementation (openai.rs); Claude / Gemini
+//! do protocol conversion (claude.rs / gemini.rs). Conversion logic is confined to this directory (see Spec decision 6).
 
 pub mod claude;
 pub mod gemini;
@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::domain::channel::ChannelType;
 use crate::domain::provider::{ProviderAdaptor, ProviderError, StreamEvent, Usage};
 
-/// 按渠道类型返回对应的适配器实例（Box<dyn> 隐藏具体协议差异）。
+/// Returns the adapter instance for the channel type (Box<dyn> hides the protocol differences).
 pub fn adaptor_for(channel_type: ChannelType) -> Box<dyn ProviderAdaptor> {
     match channel_type {
         ChannelType::OpenAi | ChannelType::DeepSeek | ChannelType::Custom => {
@@ -25,7 +25,8 @@ pub fn adaptor_for(channel_type: ChannelType) -> Box<dyn ProviderAdaptor> {
     }
 }
 
-/// 解析转发目标 Base URL：渠道显式配置优先，否则回退适配器默认值；两者皆无报配置错误。
+/// Resolves the forwarding Base URL: explicit channel config wins, otherwise falls back to the adapter
+/// default; if neither is present, reports a config error.
 pub(super) fn resolve_base_url(
     channel: &crate::domain::channel::Channel,
     default: Option<&'static str>,
@@ -38,7 +39,8 @@ pub(super) fn resolve_base_url(
     }
 }
 
-/// 渠道必须配置上游密钥；缺失报配置错误（上游密钥绝不随响应下发或写日志）。
+/// The channel must configure an upstream key; missing it is a config error (the upstream key is never
+/// relayed in responses or written to logs).
 pub(super) fn require_api_key(
     channel: &crate::domain::channel::Channel,
 ) -> Result<&str, ProviderError> {
@@ -48,8 +50,9 @@ pub(super) fn require_api_key(
         .ok_or_else(|| ProviderError::NotConfigured("api key is required".into()))
 }
 
-/// 从 OpenAI 请求的 `content` 字段提取纯文本：字符串直接取，text 块按序拼接。
-/// 用于转换到 Anthropic / Gemini（两者均以文本为主要载体）。
+/// Extracts plain text from the `content` field of an OpenAI request: a string is taken as-is,
+/// text blocks are joined in order. Used for conversion to Anthropic / Gemini (both use text
+/// as their primary carrier).
 pub(super) fn extract_text_content(content: Option<&Value>) -> Option<String> {
     match content {
         Some(Value::String(s)) => Some(s.clone()),
@@ -74,7 +77,8 @@ pub(super) fn extract_text_content(content: Option<&Value>) -> Option<String> {
     }
 }
 
-/// 从 `usage` 值对象构造 JSON 对象（OpenAI 兼容 usage 字段），用于流式 chunk 携带用量。
+/// Builds a JSON object from the `usage` value object (OpenAI-compatible usage field), so streaming
+/// chunks can carry usage.
 pub(super) fn usage_to_json(u: Usage) -> Value {
     let mut v = json!({});
     if let Some(p) = u.prompt_tokens {
@@ -89,7 +93,8 @@ pub(super) fn usage_to_json(u: Usage) -> Value {
     v
 }
 
-/// 构造 OpenAI `chat.completion.chunk` 帧（content 为空时 delta 为空对象）。Claude / Gemini 转换共用。
+/// Builds an OpenAI `chat.completion.chunk` frame (delta is an empty object when content is empty).
+/// Shared by Claude / Gemini conversion.
 pub(super) fn chunk_event(
     id: &str,
     model: &str,
@@ -117,7 +122,7 @@ pub(super) fn chunk_event(
     }
 }
 
-/// 构造流结束帧：空 delta + 指定 finish_reason。Claude / Gemini 转换共用。
+/// Builds a stream-end frame: empty delta + given finish_reason. Shared by Claude / Gemini conversion.
 pub(super) fn finish_event(
     id: &str,
     model: &str,
@@ -137,9 +142,9 @@ pub(super) fn finish_event(
     }
 }
 
-/// 构造上游错误响应体（非 2xx）：用通用错误 JSON 替换上游原文——OpenAI 兼容端点在 401
-/// 错误体会回显所提交的密钥（`Incorrect API key provided: sk-...`），原样透传即泄漏
-/// （红线：上游密钥不暴露给下游）。保留状态码，丢弃正文。
+/// Builds an upstream error response body (non-2xx): replaces the upstream text with a generic error JSON —
+/// OpenAI-compatible endpoints echo the submitted key in 401 error bodies (`Incorrect API key provided: sk-...`),
+/// so relaying verbatim would leak it (red line: upstream keys must not be exposed downstream). Keeps the status code, drops the body.
 pub(super) fn upstream_error_body(status_code: u16) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "error": {
@@ -150,8 +155,8 @@ pub(super) fn upstream_error_body(status_code: u16) -> Vec<u8> {
     .unwrap_or_default()
 }
 
-/// 构造上游错误 SSE 帧：`data: {错误 JSON}\n\n`。错误体同上不携带上游原文，
-/// 且帧符合 `data:` 行格式，下游 SSE 解析器可正常消费。
+/// Builds an upstream error SSE frame: `data: {error JSON}\n\n`. The error body, as above, does not
+/// carry upstream text, and the frame follows the `data:` line format so downstream SSE parsers can consume it.
 pub(super) fn upstream_error_event(status_code: u16) -> StreamEvent {
     StreamEvent {
         data: format!(

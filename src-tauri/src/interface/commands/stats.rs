@@ -1,7 +1,7 @@
-//! 控制面：仪表盘统计命令（get_stats）。
+//! Control plane: dashboard stats command (get_stats).
 //!
-//! 命令是薄胶水：解析入参（前端本地时区偏移）→ 调统计用例 → 返回快照。
-//! "今日" 与 7 天趋势按前端本地时区日界聚合，数据与请求日志一致（见 usecases/stats.rs）。
+//! Commands are thin glue: parse input (frontend local timezone offset) → call the stats usecase → return a snapshot.
+//! "Today" and the 7-day trend aggregate by the frontend local timezone day boundary, consistent with request logs (see usecases/stats.rs).
 
 use chrono::Utc;
 use tauri::State;
@@ -9,8 +9,8 @@ use tauri::State;
 use crate::infrastructure::sqlite::request_log::SqliteRequestLogRepository;
 use crate::usecases::stats::{GetStatsUsecase, StatsQuery, StatsSnapshot};
 
-/// 仪表盘统计：卡片指标（今日 / 累计请求数与 Token、平均延迟、渠道可用率）+ 7 天趋势。
-/// `timezone_offset_minutes` 为前端本地时区偏移（JS `Date.getTimezoneOffset()`：西为正，东为负）。
+/// Dashboard stats: card metrics (today / cumulative requests and tokens, average latency, channel availability) + 7-day trend.
+/// `timezone_offset_minutes` is the frontend local timezone offset (JS `Date.getTimezoneOffset()`: west positive, east negative).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_stats(
     repo: State<'_, SqliteRequestLogRepository>,

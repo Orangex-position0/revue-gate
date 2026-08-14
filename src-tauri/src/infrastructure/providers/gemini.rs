@@ -1,9 +1,9 @@
-//! Gemini 适配器：OpenAI 兼容请求 ↔ Gemini generateContent API 协议转换。
+//! Gemini adapter: OpenAI-compatible request ↔ Gemini generateContent API protocol conversion.
 //!
-//! 请求转换：system 消息拆到 `systemInstruction`、user/assistant 映射 `contents.parts`、
-//! `max_tokens` 缺失时注入默认值；非流式响应把 Gemini `candidates` 结构转为 OpenAI
-//! `chat.completion`；流式（`:streamGenerateContent?alt=sse`）把 Gemini SSE 事件逐条转成
-//! OpenAI `chat.completion.chunk` 并合成 `[DONE]` 收尾。转换逻辑限定在本文件。
+//! Request conversion: system messages split into `systemInstruction`, user/assistant mapped to `contents.parts`,
+//! `max_tokens` injected with a default when missing; non-streaming responses convert the Gemini `candidates`
+//! structure to OpenAI `chat.completion`; streaming (`:streamGenerateContent?alt=sse`) converts Gemini SSE
+//! events one by one to OpenAI `chat.completion.chunk` and appends `[DONE]`. Conversion logic is confined to this file.
 
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use crate::infrastructure::providers::{
     upstream_error_body, upstream_error_event,
 };
 
-/// Gemini 适配器：默认 Base URL `https://generativelanguage.googleapis.com`，模型列表供渠道表单预填。
+/// Gemini adapter: default Base URL `https://generativelanguage.googleapis.com`; the model list pre-fills the channel form.
 pub struct GeminiAdaptor {
     client: Client,
 }
@@ -42,9 +42,9 @@ impl Default for GeminiAdaptor {
     }
 }
 
-/// Gemini 请求需要 `maxOutputTokens`，OpenAI 请求可能不携带，此处注入默认值。
+/// Gemini requests require `maxOutputTokens`, which OpenAI requests may not carry; inject a default here.
 const DEFAULT_MAX_OUTPUT_TOKENS: u64 = 4096;
-/// Gemini REST 认证头（密钥走 header，不放进 URL 查询串，避免写进日志）。
+/// Gemini REST auth header (the key goes in a header, not the URL query string, to avoid it being written to logs).
 const GEMINI_API_KEY_HEADER: &str = "x-goog-api-key";
 
 #[async_trait::async_trait]
@@ -65,7 +65,7 @@ impl ProviderAdaptor for GeminiAdaptor {
         Some("https://generativelanguage.googleapis.com")
     }
 
-    /// 连通性测试：`GET {base_url}/v1beta/models`（Gemini 模型列表端点）。
+    /// Connectivity test: `GET {base_url}/v1beta/models` (Gemini model list endpoint).
     async fn test(&self, channel: &Channel) -> Result<TestResult, ProviderError> {
         let base_url = resolve_base_url(channel, self.default_base_url())?;
         let api_key = require_api_key(channel)?;
@@ -98,7 +98,7 @@ impl ProviderAdaptor for GeminiAdaptor {
         })
     }
 
-    /// 非流式转发：转换请求 → POST `/v1beta/models/{model}:generateContent` → 转换响应为 OpenAI 格式。
+    /// Non-streaming forward: convert request → POST `/v1beta/models/{model}:generateContent` → convert response to OpenAI format.
     async fn forward(
         &self,
         channel: &Channel,
@@ -122,7 +122,7 @@ impl ProviderAdaptor for GeminiAdaptor {
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         let status_code = resp.status().as_u16();
         if status_code >= 400 {
-            // 上游错误体原样透传会带回显密钥的风险，统一替换为通用错误体（红线）。
+            // Relaying the upstream error body verbatim risks echoing the key; replace it with a generic error body (red line).
             return Ok(ProviderResponse {
                 status_code,
                 body: upstream_error_body(status_code),
@@ -146,7 +146,7 @@ impl ProviderAdaptor for GeminiAdaptor {
         })
     }
 
-    /// 流式转发：POST `:streamGenerateContent?alt=sse` → 逐事件转 OpenAI chunk。
+    /// Streaming forward: POST `:streamGenerateContent?alt=sse` → convert each event to an OpenAI chunk.
     async fn forward_stream(
         &self,
         channel: &Channel,
@@ -169,7 +169,7 @@ impl ProviderAdaptor for GeminiAdaptor {
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
-            // 丢弃上游错误体（可能回显密钥），下发通用错误 SSE 帧（红线）。
+            // Drop the upstream error body (may echo the key), emit a generic error SSE frame (red line).
             let status = resp.status().as_u16();
             return Ok(Box::pin(stream::once(async move {
                 Ok(upstream_error_event(status))
@@ -182,7 +182,7 @@ impl ProviderAdaptor for GeminiAdaptor {
     }
 }
 
-/// 把 OpenAI 兼容请求转为 Gemini `generateContent` 请求体。
+/// Converts an OpenAI-compatible request into a Gemini `generateContent` request body.
 fn to_gemini_request(request: &ChatRequest) -> Result<Value, ProviderError> {
     let messages = request
         .body
@@ -199,7 +199,7 @@ fn to_gemini_request(request: &ChatRequest) -> Result<Value, ProviderError> {
             .unwrap_or("user");
         let content = extract_text_content(message.get("content"));
         match role {
-            // system 消息拆到独立 `systemInstruction` 字段。
+            // System messages split into the separate `systemInstruction` field.
             "system" => {
                 if let Some(text) = content {
                     system_texts.push(text);
@@ -209,7 +209,7 @@ fn to_gemini_request(request: &ChatRequest) -> Result<Value, ProviderError> {
                 "role": "model",
                 "parts": [{"text": content.unwrap_or_default()}],
             })),
-            // tool / function / developer 等无对应语义的消息兜底为 user（MVP 取舍）。
+            // Messages with no matching semantics (tool / function / developer) fall back to user (MVP trade-off).
             _ => contents.push(json!({
                 "role": "user",
                 "parts": [{"text": content.unwrap_or_default()}],
@@ -237,13 +237,13 @@ fn to_gemini_request(request: &ChatRequest) -> Result<Value, ProviderError> {
         gemini["systemInstruction"] = json!({"parts": [{"text": system_texts.join("\n")}]});
     }
     if request.stream {
-        // 流式场景下让最后一个 chunk 携带 usageMetadata，便于解析用量。
+        // In streaming, make the last chunk carry usageMetadata so usage can be parsed.
         gemini["streamConfig"] = json!({"streamIncludeUsage": true});
     }
     Ok(gemini)
 }
 
-/// 把 Gemini 非流式响应转为 OpenAI `chat.completion` 格式。
+/// Converts a non-streaming Gemini response to the OpenAI `chat.completion` format.
 fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError> {
     let content = resp
         .pointer("/candidates/0/content/parts")
@@ -276,7 +276,7 @@ fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError> {
     }))
 }
 
-/// 从 Gemini 响应提取 usage（`promptTokenCount` → prompt，`candidatesTokenCount` → completion）。
+/// Extracts usage from a Gemini response (`promptTokenCount` → prompt, `candidatesTokenCount` → completion).
 fn usage_from_gemini(resp: &Value) -> Option<Usage> {
     let usage = resp.get("usageMetadata")?;
     let prompt = usage.get("promptTokenCount").and_then(Value::as_u64);
@@ -295,18 +295,19 @@ fn usage_from_gemini(resp: &Value) -> Option<Usage> {
     )
 }
 
-/// 把 Gemini 流式 SSE 逐事件转成 OpenAI chunk，流结束合成 `[DONE]`。
-/// 一条 SSE 行可能同时携带文本、finishReason 与 usageMetadata，转为多个事件按序下发。
-/// 状态（行缓冲 / 待发事件队列 / 是否已发 [DONE]）在 unfold 闭包内自持。
+/// Converts Gemini streaming SSE events one by one into OpenAI chunks, appending `[DONE]` at stream end.
+/// A single SSE line may carry text, finishReason and usageMetadata at once; emit multiple events in order.
+/// State (line buffer / pending event queue / whether [DONE] was emitted) is held inside the unfold closure.
 fn gemini_sse_to_openai(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     model: String,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static {
     let created = Utc::now().timestamp();
     let id = format!("chatcmpl-gemini-{created}");
-    // Box::pin 使未 pinned 的 impl Stream 满足 unfold 内部 `.next()` 的 Unpin 约束。
+    // Box::pin makes the unpinned impl Stream satisfy the Unpin bound required by `.next()` inside unfold.
     let byte_stream = Box::pin(byte_stream);
-    // `model` / `id` 放进状态元组（而非闭包捕获），否则 async 块无法在其内部借用。
+    // `model` / `id` go into the state tuple (rather than being captured by the closure); otherwise the
+    // async block cannot borrow them inside.
     futures_util::stream::unfold(
         (
             byte_stream,
@@ -319,7 +320,7 @@ fn gemini_sse_to_openai(
         move |(mut byte_stream, mut pending, mut queued, model, id, mut done)| async move {
             loop {
                 if !queued.is_empty() {
-                    // 单条 SSE 行可产出多个事件，按序下发（队列很小，remove(0) 足够）。
+                    // A single SSE line can produce multiple events, emitted in order (the queue is tiny, so remove(0) is fine).
                     let event = queued.remove(0);
                     return Some((Ok(event), (byte_stream, pending, queued, model, id, done)));
                 }
@@ -355,8 +356,8 @@ fn gemini_sse_to_openai(
     )
 }
 
-/// 处理一条 Gemini SSE `data:` 行：文本 → content chunk，finishReason → finish chunk，
-/// usageMetadata → 附带到对应 chunk。无输出时无事发生。
+/// Processes one Gemini SSE `data:` line: text → content chunk, finishReason → finish chunk,
+/// usageMetadata → attached to the corresponding chunk. Nothing happens when there is no output.
 fn process_gemini_line(
     line: &[u8],
     model: &str,
@@ -379,7 +380,7 @@ fn process_gemini_line(
         .pointer("/candidates/0/finishReason")
         .and_then(Value::as_str);
     let usage = usage_from_gemini(&value);
-    // usageMetadata 通常随首个（prompt 计数）与末个 chunk 出现，附加到就近的事件。
+    // usageMetadata usually appears with the first (prompt count) and last chunks; attach it to the nearest event.
     if !content.is_empty() {
         queued.push(chunk_event(id, model, created, content, usage));
     } else if usage.is_some() {
@@ -413,7 +414,7 @@ mod tests {
     use crate::domain::channel::ChannelType;
     use crate::infrastructure::providers::test_util;
 
-    /// 连通性测试：`GET /v1beta/models` 2xx 视为成功。
+    /// Connectivity test: `GET /v1beta/models` 2xx counts as success.
     #[tokio::test]
     async fn test_reports_ok_on_success() {
         let router = Router::new().route(
@@ -431,8 +432,9 @@ mod tests {
         assert_eq!(result.error, None);
     }
 
-    /// 非流式转发：请求被转成 Gemini generateContent 格式（systemInstruction 拆出、
-    /// maxOutputTokens 注入、role 映射 user/model），响应转回 OpenAI 格式并解析 usage。
+    /// Non-streaming forward: the request is converted to the Gemini generateContent format (systemInstruction
+    /// split out, maxOutputTokens injected, roles mapped user/model), and the response is converted back to the
+    /// OpenAI format with usage parsed.
     #[tokio::test]
     async fn forward_converts_request_and_response() {
         let received: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
@@ -504,7 +506,8 @@ mod tests {
         );
     }
 
-    /// 流式转发：Gemini SSE 事件逐条转成 OpenAI chunk（含 usage 与 finish），`[DONE]` 收尾。
+    /// Streaming forward: Gemini SSE events are converted one by one into OpenAI chunks (including usage and
+    /// finish), ending with `[DONE]`.
     #[tokio::test]
     async fn forward_stream_converts_sse_to_chunks() {
         let payload = concat!(
@@ -575,8 +578,8 @@ mod tests {
         );
     }
 
-    /// 上游错误：非 2xx 响应体不原样透传（防止上游在错误体回显密钥），
-    /// 替换为通用错误体并保留状态码。
+    /// Upstream error: non-2xx response bodies are not relayed verbatim (prevents the upstream echoing the
+    /// key in the error body); replaced with a generic error body while keeping the status code.
     #[tokio::test]
     async fn forward_sanitizes_upstream_error_body() {
         let router = Router::new().route(

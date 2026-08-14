@@ -1,10 +1,10 @@
-//! Channel 聚合根：实体 + 模型映射值对象 + ChannelRepository trait。
+//! Channel aggregate root: entity + model mapping value object + ChannelRepository trait.
 //!
-//! 字段与需求对齐（`docs/Requirements.md` 渠道管理）：名称/类型/Base URL/API Key/
-//! 模型列表/优先级/权重/模型映射/启停状态/最近测试。仓储 trait 随聚合根放置，不拆子文件夹。
+//! Fields align with the requirements (`docs/Requirements.md` channel management): name/type/Base URL/API Key/
+//! model list/priority/weight/model mappings/enable-disable state/last test. Repository traits live with the aggregate root, not split into subfolders.
 //!
-//! serde 派生态用于跨 Tauri Command 边界序列化（前端类型见 `src/types/index.ts`）：
-//! 字段输出 camelCase、渠道类型输出小写字符串。
+//! The serde derives are used for serialization across the Tauri Command boundary (frontend types in `src/types/index.ts`):
+//! fields are output in camelCase and channel types as lowercase strings.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
 
-/// 内置渠道类型。OpenAI / DeepSeek / Custom 走 OpenAI-compatible 直通，
-/// Claude / Gemini 走协议转换适配器（实现位于 infrastructure/providers，本阶段不涉及）。
+/// Built-in channel types. OpenAI / DeepSeek / Custom use OpenAI-compatible passthrough,
+/// Claude / Gemini use protocol conversion adapters (implemented in infrastructure/providers, out of scope this stage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelType {
@@ -24,56 +24,56 @@ pub enum ChannelType {
     Gemini,
 }
 
-/// 模型映射值对象：客户端统一模型名 ↔ 上游实际模型名；未映射时直传。
+/// Model mapping value object: unified client model name ↔ actual upstream model name; passthrough when unmapped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMapping {
-    /// 客户端（下游）使用的统一模型名。
+    /// Unified model name used by the client (downstream).
     pub client_model: String,
-    /// 上游渠道实际模型名。
+    /// Actual model name on the upstream channel.
     pub upstream_model: String,
 }
 
-/// Channel 实体：一条可调度到上游的渠道配置。
+/// Channel entity: a channel configuration that can be dispatched to upstream.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Channel {
     pub id: Uuid,
-    /// 管理员可读名称，如 `openai-prod`。
+    /// Admin-readable name, e.g. `openai-prod`.
     pub name: String,
     pub channel_type: ChannelType,
-    /// 上游 Base URL；为 None 时由 ProviderAdaptor 提供默认值。
+    /// Upstream Base URL; when None, ProviderAdaptor provides a default.
     pub base_url: Option<String>,
-    /// 上游 API Key。红线：任何路径不得下发给下游或写入请求日志明文，
-    /// 控制面命令返回前会遮蔽（见 interface/commands/channel.rs）。
+    /// Upstream API Key. Red line: must never be exposed to downstream or written in plaintext to request logs;
+    /// masked before control-plane commands return (see interface/commands/channel.rs).
     pub api_key: Option<String>,
-    /// 该渠道支持的上游模型列表。
+    /// List of upstream models this channel supports.
     pub models: Vec<String>,
-    /// 调度优先级（数值越小越优先；候选排序按优先级升序）。
+    /// Dispatch priority (smaller values take precedence; candidates sorted ascending by priority).
     pub priority: i32,
-    /// 权重字段：v0.1 仅持久化与回显，加权调度属高可用增强（Out of Scope）。
+    /// Weight field: v0.1 only persists and echoes it; weighted dispatch is a high-availability enhancement (Out of Scope).
     pub weight: i32,
-    /// 模型映射表。
+    /// Model mapping table.
     pub model_mappings: Vec<ModelMapping>,
-    /// 启停状态；禁用渠道不参与调度（行为在阶段 07 生效）。
+    /// Enable/disable state; disabled channels do not participate in dispatch (behavior takes effect in stage 07).
     pub enabled: bool,
-    /// 最近一次连通性测试时间（连通性测试随阶段 06 ProviderAdaptor 加入）。
+    /// Timestamp of the last connectivity test (connectivity tests arrive with the stage 06 ProviderAdaptor).
     pub last_test_at: Option<DateTime<Utc>>,
-    /// 最近一次连通性测试是否成功。
+    /// Whether the last connectivity test succeeded.
     pub last_test_ok: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// Channel 仓储 trait：领域层定义接口，infrastructure 提供 sqlx 实现，usecases 只依赖 trait。
+/// Channel repository trait: interface defined in the domain layer, sqlx implementation in infrastructure, usecases depend only on the trait.
 #[async_trait::async_trait]
 pub trait ChannelRepository: Send + Sync {
-    /// 按 id 查找渠道。
+    /// Look up a channel by id.
     async fn find_by_id(&self, id: Uuid) -> Result<Option<Channel>, RepositoryError>;
-    /// 列出全部渠道（排序策略由实现决定，默认按优先级升序）。
+    /// List all channels (ordering is implementation-defined, ascending by priority by default).
     async fn list(&self) -> Result<Vec<Channel>, RepositoryError>;
-    /// 新建或覆盖保存渠道。
+    /// Create or overwrite-save a channel.
     async fn save(&self, channel: &Channel) -> Result<(), RepositoryError>;
-    /// 按 id 删除渠道；未命中返回 `RepositoryError::NotFound`。
+    /// Delete a channel by id; returns `RepositoryError::NotFound` when not found.
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
 }

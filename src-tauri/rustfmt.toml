@@ -1,5 +1,5 @@
-# rustfmt 配置：2024 edition 风格，宽度 100
-# newline_style=Auto：项目 git core.autocrlf=true，工作树为 CRLF；强制 Unix 会让 fmt --check 在每次 commit 失败
+# rustfmt config: 2024 edition style, width 100
+# newline_style=Auto: the repo sets git core.autocrlf=true so the worktree is CRLF; forcing Unix would make fmt --check fail on every commit
 edition = "2024"
 style_edition = "2024"
 max_width = 100

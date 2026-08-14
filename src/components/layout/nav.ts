@@ -1,4 +1,4 @@
-// 主导航定义：Sidebar（渲染导航项）与 TopBar（取当前页标题）共用。
+// Primary navigation definition: shared by Sidebar (renders nav items) and TopBar (resolves the current page title).
 import type { LucideIcon } from "lucide-react";
 import { KeyRound, LayoutDashboard, Network, ScrollText, Settings } from "lucide-react";
 

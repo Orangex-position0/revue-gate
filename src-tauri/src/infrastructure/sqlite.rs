@@ -1,5 +1,5 @@
-//! 基础设施层 SQLite 模块入口：连接池初始化 + 内嵌迁移（sqlite.rs 承载入口，
-//! 各仓储实现落地于 sqlite/ 子目录，遵循 2024 Edition `foo.rs` 模块布局）。
+//! Infrastructure SQLite module entry: connection pool init + embedded migrations (sqlite.rs is the entry;
+//! repository implementations live under sqlite/, following the 2024 Edition `foo.rs` module layout).
 
 pub mod api_key;
 pub mod channel;
@@ -10,7 +10,7 @@ use std::str::FromStr;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-/// 基础设施层错误：连接/查询与迁移失败统一在此收口。
+/// Infrastructure layer error: connection/query and migration failures are unified here.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("sqlite error: {0}")]
@@ -19,9 +19,9 @@ pub enum DbError {
     Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
-/// 打开 SQLite 连接池并应用内嵌迁移（`sqlx::migrate!` 打包 `migrations/` 目录）。
+/// Opens a SQLite connection pool and applies embedded migrations (`sqlx::migrate!` bundles the `migrations/` directory).
 ///
-/// `db_path` 支持文件路径或 `sqlite::memory:`（仅测试用）；文件不存在时自动创建。
+/// `db_path` supports a file path or `sqlite::memory:` (tests only); the file is auto-created when missing.
 pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
     let options = SqliteConnectOptions::from_str(db_path)?.create_if_missing(true);
     let pool = SqlitePoolOptions::new()
@@ -37,7 +37,7 @@ mod tests {
     use super::*;
     use sqlx::Row;
 
-    /// 内嵌迁移应用后，核心业务表（channels / api_keys / request_logs）应存在。
+    /// After embedded migrations are applied, the core business tables (channels / api_keys / request_logs) should exist.
     #[tokio::test]
     async fn init_pool_applies_embedded_migrations() {
         let dir = std::env::temp_dir().join(format!("revue-gate-test-{}", std::process::id()));

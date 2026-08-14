@@ -1,5 +1,5 @@
-// 跨页共享类型集中导出：与后端 Command 签名一一对应（见 Architecture-frontend.md）。
-// 字段名与后端 serde camelCase 对齐（Channel / ChannelInput / ModelMapping 见 domain/channel.rs）。
+// Central exports of cross-page shared types: one-to-one with the backend Command signatures (see Architecture-frontend.md).
+// Field names align with the backend's serde camelCase (Channel / ChannelInput / ModelMapping see domain/channel.rs).
 
 export interface ServerStatus {
   running: boolean;
@@ -7,16 +7,16 @@ export interface ServerStatus {
   port: number | null;
 }
 
-/** 渠道类型：与后端 ChannelType 枚举 lowercase 序列化一致。 */
+/** Channel type: serialized lowercase, consistent with the backend ChannelType enum. */
 export type ChannelType = "openai" | "deepseek" | "custom" | "claude" | "gemini";
 
-/** 模型映射值对象：客户端统一模型名 ↔ 上游实际模型名。 */
+/** Model mapping value object: client unified model name ↔ upstream actual model name. */
 export interface ModelMapping {
   clientModel: string;
   upstreamModel: string;
 }
 
-/** 创建 / 编辑渠道入参（create 与 update 共用；update 时 apiKey 为 null = 保持原密钥）。 */
+/** Create / edit channel input (shared by create and update; apiKey null on update = keep the original key). */
 export interface ChannelInput {
   name: string;
   channelType: ChannelType;
@@ -29,7 +29,7 @@ export interface ChannelInput {
   enabled: boolean;
 }
 
-/** 渠道实体：Command 返回；apiKey 已被后端遮蔽恒为 null，lastTest* 待连通性测试（阶段 06）填充。 */
+/** Channel entity: returned by Commands; apiKey is always masked to null by the backend, lastTest* is filled in by the connectivity test (phase 06). */
 export interface Channel extends ChannelInput {
   id: string;
   lastTestAt: string | null;
@@ -38,7 +38,7 @@ export interface Channel extends ChannelInput {
   updatedAt: string;
 }
 
-/** 渠道连通性测试结果：由 test_channel 命令返回，并已持久化到渠道 lastTestAt / lastTestOk。 */
+/** Channel connectivity test result: returned by the test_channel command and persisted to the channel's lastTestAt / lastTestOk. */
 export interface ChannelTestResult {
   ok: boolean;
   latencyMs: number;
@@ -46,20 +46,20 @@ export interface ChannelTestResult {
   error: string | null;
 }
 
-/** 配额值对象：limit 为上限（null = 无上限），used 为已用额度。与后端 Quota 对齐。 */
+/** Quota value object: limit is the cap (null = unlimited), used is the consumed amount. Aligned with the backend Quota. */
 export interface Quota {
   limit: number | null;
   used: number;
 }
 
-/** 创建 / 编辑密钥入参（create 与 update 共用；密钥本身不可由入参指定）。 */
+/** Create / edit API key input (shared by create and update; the key itself cannot be set via input). */
 export interface ApiKeyInput {
   name: string;
   quotaLimit: number | null;
   enabled: boolean;
 }
 
-/** 密钥实体：Command 返回。key 仅在 create 时携带明文，其余路径已被后端遮蔽为占位符。 */
+/** API key entity: returned by Commands. key carries plaintext only on create; the backend masks it to a placeholder on all other paths. */
 export interface ApiKey {
   id: string;
   name: string;
@@ -70,23 +70,23 @@ export interface ApiKey {
   updatedAt: string;
 }
 
-/** 日志查询筛选条件：全部可选，null = 不筛该维度。与后端 LogQuery（Option + serde default）对齐。 */
+/** Log query filters: all optional, null = do not filter that dimension. Aligned with the backend LogQuery (Option + serde default). */
 export interface LogQuery {
-  /** 关键词：对模型 / 上游模型 / trace / 错误做大小写不敏感子串匹配。 */
+  /** Keyword: case-insensitive substring match against model / upstream model / trace / error. */
   keyword?: string | null;
-  /** 按发起密钥筛选（api_key_id 精确匹配）。 */
+  /** Filter by the requesting key (exact api_key_id match). */
   apiKeyId?: string | null;
-  /** 按渠道筛选（channel_id 精确匹配）。 */
+  /** Filter by channel (exact channel_id match). */
   channelId?: string | null;
-  /** 按请求模型名筛选（大小写不敏感子串匹配）。 */
+  /** Filter by request model name (case-insensitive substring match). */
   model?: string | null;
-  /** 日期下界（左闭）：created_at >= startAt。 */
+  /** Lower date bound (inclusive): created_at >= startAt. */
   startAt?: string | null;
-  /** 日期上界（右开）：created_at < endAt。 */
+  /** Upper date bound (exclusive): created_at < endAt. */
   endAt?: string | null;
 }
 
-/** 请求日志实体：一次请求的完整审计记录（与后端 RequestLog 对齐）。 */
+/** Request log entity: the full audit record of one request (aligned with the backend RequestLog). */
 export interface RequestLog {
   id: string;
   apiKeyId: string | null;
@@ -106,65 +106,65 @@ export interface RequestLog {
   createdAt: string;
 }
 
-/** 分页查询结果：当前页日志 + 满足筛选的总条数（供计算总页数）。 */
+/** Paginated query result: current-page logs + the total count matching the filters (for computing total pages). */
 export interface LogPage {
   items: RequestLog[];
   total: number;
 }
 
-/** 一条对话消息（日志详情展示；content 为文本或 null）。 */
+/** A single conversation message (shown in the log detail; content is text or null). */
 export interface ConversationMessage {
   role: string;
   content: string | null;
-  /** 该消息触发的工具调用名。 */
+  /** Names of the tool calls triggered by this message. */
   toolNames: string[];
 }
 
-/** 日志详情：日志（扁平字段）+ 从请求体解析出的对话 / 参数 / 工具标签。 */
+/** Log detail: the log (flat fields) + conversation / params / tool tags parsed from the request body. */
 export interface LogDetail extends RequestLog {
   conversation: ConversationMessage[];
-  /** 请求参数：request_body 顶层除 messages / tools / stream 之外的字段。 */
+  /** Request params: request_body top-level fields other than messages / tools / stream. */
   requestParams: unknown;
-  /** 工具标签：声明 + 调用去重合并。 */
+  /** Tool tags: declarations and calls merged with deduplication. */
   toolNames: string[];
 }
 
-/** 7 天趋势折线的单个数据点（date 为本地时区日期 YYYY-MM-DD）。 */
+/** A single data point on the 7-day trend line (date is a local-timezone date, YYYY-MM-DD). */
 export interface DailyStat {
   date: string;
   requests: number;
   tokens: number;
 }
 
-/** 仪表盘统计快照：卡片指标 + 7 天趋势（与请求日志数据一致）。 */
+/** Dashboard stats snapshot: card metrics + 7-day trend (consistent with request log data). */
 export interface StatsSnapshot {
-  /** 今日（本地时区）请求数。 */
+  /** Today's (local timezone) request count. */
   todayRequests: number;
-  /** 今日（本地时区）总 token。 */
+  /** Today's (local timezone) total tokens. */
   todayTokens: number;
-  /** 累计请求数。 */
+  /** Cumulative request count. */
   totalRequests: number;
-  /** 累计总 token。 */
+  /** Cumulative total tokens. */
   totalTokens: number;
-  /** 平均延迟（毫秒）：全部请求 duration_ms 的均值；无日志为 0。 */
+  /** Average latency (ms): mean of duration_ms across all requests; 0 when no logs. */
   avgLatencyMs: number;
-  /** 渠道可用率（0..=1）：status_code < 400 的请求占比；无日志为 0。 */
+  /** Channel availability (0..=1): share of requests with status_code < 400; 0 when no logs. */
   channelAvailability: number;
-  /** 最近 7 天（含今日，旧→新）按本地日聚合。 */
+  /** Last 7 days (including today, oldest → newest) aggregated by local day. */
   trend: DailyStat[];
 }
 
-/** 界面主题三态：与后端 Theme 枚举 lowercase 序列化一致。 */
+/** UI theme tri-state: serialized lowercase, consistent with the backend Theme enum. */
 export type Theme = "light" | "dark" | "system";
 
-/** 失败重试策略：enabled 开关；max_retries = 首次之后的额外尝试次数（null = 无上限）。
- *  字段为 snake_case：后端 RetryPolicy 无 rename_all，仅 GatewaySettings 整体 camelCase。 */
+/** Failure retry policy: enabled toggle; max_retries = extra attempts after the first (null = unlimited).
+ *  Fields are snake_case: the backend RetryPolicy has no rename_all, only GatewaySettings is camelCase as a whole. */
 export interface RetryPolicy {
   enabled: boolean;
   max_retries: number | null;
 }
 
-/** 网关设置快照：与后端 GatewaySettings serde camelCase 对齐；port 0 = 随机端口。 */
+/** Gateway settings snapshot: aligned with the backend GatewaySettings serde camelCase; port 0 = random port. */
 export interface GatewaySettings {
   host: string;
   port: number;

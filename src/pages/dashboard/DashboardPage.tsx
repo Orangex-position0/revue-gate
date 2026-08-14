@@ -1,6 +1,6 @@
-// 仪表盘页：6 张统计卡片（今日/累计请求数与 Token、平均延迟、渠道可用率）+ 7 天请求数/Token 趋势折线。
-// 数据本地 useState + load()（见 Architecture-frontend.md「业务数据不进 store」）。
-// 趋势图用内联 SVG 折线，不引入图表库（ticket 11 无多态图要求，见 ponytail 原则）。
+// Dashboard page: 6 stat cards (today/cumulative request counts and Tokens, average latency, channel availability) + 7-day request/Token trend lines.
+// Data is local useState + load() (see Architecture-frontend.md "business data does not go into the store").
+// Trend charts use inline SVG polylines, no chart library (ticket 11 needs no polymorphic charts, per the ponytail principle).
 import { useCallback, useEffect, useState } from "react";
 import { statsApi, invokeErrorMessage } from "@/lib/api";
 import type { DailyStat, StatsSnapshot } from "@/types";
@@ -11,25 +11,25 @@ const labelCls = "text-xs font-medium text-muted-foreground";
 const valueCls = "mt-1 text-2xl font-semibold tabular-nums";
 const subCls = "mt-1 text-xs text-muted-foreground";
 
-/** 千分位格式化（Token / 请求数）。 */
+/** Thousands-separator formatting (Tokens / request counts). */
 function formatCount(n: number): string {
   return n.toLocaleString();
 }
 
-/** 可用率百分比（0..=1 → 0.0%..100.0%）。 */
+/** Availability percentage (0..=1 → 0.0%..100.0%). */
 function formatPercent(rate: number): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
-/** 图表 Y 轴刻度：为 0 时显示 0，否则显示最大值（空数据为平直线）。 */
+/** Chart Y-axis scale: 0 when all values are 0, otherwise the max (empty data renders a flat line). */
 function yMax(points: DailyStat[], valueOf: (d: DailyStat) => number): number {
   const max = Math.max(0, ...points.map(valueOf));
   return max === 0 ? 1 : max;
 }
 
 /**
- * 迷你趋势折线：宽度自适应，Y 轴按数据最大值缩放，X 轴等距 7 点。
- * 数据全零时画底部平直线；纯展示组件，无交互。
+ * Mini trend polyline: width-adaptive, Y axis scaled by the data max, X axis at 7 evenly spaced points.
+ * Draws a flat baseline when all data is zero; pure presentational component, no interaction.
  */
 function TrendChart({
   points,
@@ -44,12 +44,12 @@ function TrendChart({
 }) {
   const W = 600;
   const H = 140;
-  const PAD = 8; // 底部日期标签与顶部留白
+  const PAD = 8; // padding for the bottom date labels and the top
   const innerW = W - PAD * 2;
   const innerH = H - PAD * 2;
   const max = yMax(points, valueOf);
 
-  // X 等距（首尾留半格避免贴边），Y 底部对齐。
+  // X evenly spaced (half-step at both ends to avoid touching edges), Y aligned to the bottom.
   const step = points.length > 1 ? innerW / (points.length - 1) : innerW;
   const coords = points.map((d, i) => ({
     x: PAD + i * step,
@@ -72,7 +72,7 @@ function TrendChart({
         role="img"
         aria-label={`${label}近 7 天趋势`}
       >
-        {/* 底部日期标签 */}
+        {/* Bottom date labels */}
         {points.map((d, i) => (
           <text
             key={d.date}
@@ -85,7 +85,7 @@ function TrendChart({
             {d.date.slice(5)}
           </text>
         ))}
-        {/* 数据折线 */}
+        {/* Data polyline */}
         <polyline
           points={line}
           fill="none"
@@ -94,7 +94,7 @@ function TrendChart({
           strokeLinejoin="round"
           strokeLinecap="round"
         />
-        {/* 数据点 */}
+        {/* Data points */}
         {coords.map((p, i) => (
           <circle key={i} cx={p.x} cy={p.y} r={2.5} fill={color} />
         ))}
@@ -103,7 +103,7 @@ function TrendChart({
   );
 }
 
-/** 统计卡片：标签 + 主值 + 副说明。 */
+/** Stat card: label + primary value + secondary caption. */
 function StatCard({
   label,
   value,
@@ -130,7 +130,7 @@ export function DashboardPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // 后端按前端本地时区日界聚合；getTimezoneOffset() 返回分钟西偏（与后端约定一致）。
+      // The backend aggregates by the frontend's local-timezone day boundary; getTimezoneOffset() returns minutes, positive west (matches the backend convention).
       setStats(await statsApi.get(new Date().getTimezoneOffset()));
       setLoadError(null);
     } catch (error) {
@@ -161,7 +161,7 @@ export function DashboardPage() {
         </p>
       )}
 
-      {/* 卡片区 */}
+      {/* Card grid */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <StatCard
           label="今日请求数"
@@ -199,7 +199,7 @@ export function DashboardPage() {
         />
       </div>
 
-      {/* 7 天趋势 */}
+      {/* 7-day trend */}
       {loading ? (
         <p className="text-sm text-muted-foreground">加载中…</p>
       ) : !stats ? null : (

@@ -1,13 +1,13 @@
-//! 供应商适配器测试支撑：在本机 127.0.0.1 随机端口起 axum mock 服务器，供真实 reqwest 打桩。
-//! 仅测试编译（`providers.rs` 中 `#[cfg(test)] mod test_util`）。
+//! Test support for provider adapters: starts an axum mock server on a random 127.0.0.1 port for real reqwest to hit.
+//! Compiles in tests only (`#[cfg(test)] mod test_util` in `providers.rs`).
 
 use axum::Router;
 use uuid::Uuid;
 
 use crate::domain::channel::{Channel, ChannelType};
 
-/// 在 127.0.0.1:0 上启动 axum 路由器，返回基础 URL 与服务器任务句柄。
-/// 用例用 `base_url` 构造 Channel，适配器的真实 reqwest 请求打到本 mock。
+/// Starts an axum router on 127.0.0.1:0, returning the base URL and the server task handle.
+/// Tests build a Channel from `base_url`; the adapter's real reqwest requests hit this mock.
 pub(crate) async fn spawn(router: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -21,7 +21,7 @@ pub(crate) async fn spawn(router: Router) -> (String, tokio::task::JoinHandle<()
     (format!("http://{addr}"), handle)
 }
 
-/// 构造指向 mock 服务器的 Channel：`base_url` 覆盖默认值，api_key 用固定测试值。
+/// Builds a Channel pointing at the mock server: `base_url` overrides the default; api_key uses a fixed test value.
 pub(crate) fn test_channel(channel_type: ChannelType, base_url: &str) -> Channel {
     Channel {
         id: Uuid::now_v7(),

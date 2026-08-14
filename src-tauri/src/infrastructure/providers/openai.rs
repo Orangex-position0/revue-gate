@@ -1,7 +1,8 @@
-//! OpenAI-compatible 直通适配器：OpenAI / DeepSeek / Custom 共用同一实现。
+//! OpenAI-compatible passthrough adapter: OpenAI / DeepSeek / Custom share the same implementation.
 //!
-//! 请求原样转发（body 已含替换后的 model），非流式响应透传并解析 `usage`；
-//! 流式响应逐帧透传原始 SSE 字节，同时用行缓冲扫描器解析 `usage`（仅检查不透传修改）。
+//! Requests are forwarded as-is (the body already contains the substituted model); non-streaming responses are
+//! relayed and `usage` is parsed; streaming responses relay raw SSE bytes frame by frame while a line-buffer
+//! scanner parses `usage` (inspect only, never modifying what is relayed).
 
 use std::time::Duration;
 
@@ -19,8 +20,8 @@ use crate::infrastructure::providers::{
     require_api_key, resolve_base_url, upstream_error_body, upstream_error_event,
 };
 
-/// OpenAI-compatible 直通适配器：按 `channel_type` 区分默认值（OpenAI / DeepSeek 有默认
-/// Base URL 与模型列表，Custom 无默认必须显式配置）。
+/// OpenAI-compatible passthrough adapter: defaults differ by `channel_type` (OpenAI / DeepSeek have default
+/// Base URL and model list; Custom has no defaults and must be explicitly configured).
 pub struct OpenAiCompatibleAdaptor {
     channel_type: ChannelType,
     client: Client,
@@ -58,12 +59,12 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
         match self.channel_type {
             ChannelType::OpenAi => Some("https://api.openai.com/v1"),
             ChannelType::DeepSeek => Some("https://api.deepseek.com/v1"),
-            // Custom 无默认：渠道必须显式配置 Base URL。
+            // Custom has no defaults: the channel must explicitly configure a Base URL.
             _ => None,
         }
     }
 
-    /// 连通性测试：`GET {base_url}/models`，2xx 视为成功。
+    /// Connectivity test: `GET {base_url}/models`, 2xx counts as success.
     async fn test(&self, channel: &Channel) -> Result<TestResult, ProviderError> {
         let base_url = resolve_base_url(channel, self.default_base_url())?;
         let api_key = require_api_key(channel)?;
@@ -96,7 +97,7 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
         })
     }
 
-    /// 非流式转发：原样 POST body 到 `{base_url}/chat/completions`，透传响应并解析 usage。
+    /// Non-streaming forward: POST the body as-is to `{base_url}/chat/completions`, relay the response and parse usage.
     async fn forward(
         &self,
         channel: &Channel,
@@ -115,8 +116,9 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         let status_code = resp.status().as_u16();
         if status_code >= 400 {
-            // 上游错误体原样透传会带回显密钥的风险（OpenAI 兼容端点 401 回显 sk-...），
-            // 统一替换为通用错误体并保留状态码（红线：上游密钥不暴露给下游）。
+            // Relaying the upstream error body verbatim risks echoing the key (OpenAI-compatible endpoints echo
+            // sk-... on 401); replace it with a generic error body while keeping the status code (red line:
+            // upstream keys must not be exposed downstream).
             return Ok(ProviderResponse {
                 status_code,
                 body: upstream_error_body(status_code),
@@ -136,8 +138,8 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
         })
     }
 
-    /// 流式转发：POST 后逐帧透传原始 SSE 字节；同时用行缓冲扫描器解析 usage。
-    /// 非 2xx 的错误响应作为单帧直接透传（下游据此失败）。
+    /// Streaming forward: after POST, relay raw SSE bytes frame by frame; a line-buffer scanner parses usage
+    /// in parallel. Non-2xx error responses are relayed as a single frame (the downstream fails accordingly).
     async fn forward_stream(
         &self,
         channel: &Channel,
@@ -155,7 +157,7 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
-            // 丢弃上游错误体（可能回显密钥），下发通用错误 SSE 帧（红线）。
+            // Drop the upstream error body (may echo the key), emit a generic error SSE frame (red line).
             let status = resp.status().as_u16();
             return Ok(Box::pin(stream::once(async move {
                 Ok(upstream_error_event(status))
@@ -165,13 +167,13 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
     }
 }
 
-/// 逐帧透传上游 SSE 字节，并返回从各帧完整行解析出的 usage（如果有）。
+/// Relays upstream SSE bytes frame by frame, returning usage parsed from complete lines in each frame (if any).
 fn relay_with_usage(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static {
     let scanner = SseUsageScanner::new();
-    // Box::pin 使未 pinned 的 impl Stream 满足 unfold 内部 `.next()` 的 Unpin 约束；
-    // scanner 放进状态元组，避免被 FnMut 闭包按值移动。
+    // Box::pin makes the unpinned impl Stream satisfy the Unpin bound required by `.next()` inside unfold;
+    // the scanner goes into the state tuple so it is not moved by value into the FnMut closure.
     let byte_stream = Box::pin(byte_stream);
     futures_util::stream::unfold(
         (byte_stream, scanner),
@@ -192,13 +194,13 @@ fn relay_with_usage(
     )
 }
 
-/// 从非流式响应体解析 usage（解析失败返回 None，响应仍原样透传）。
+/// Parses usage from a non-streaming response body (returns None on parse failure; the response is still relayed as-is).
 fn extract_usage_from_body(body: &[u8]) -> Option<Usage> {
     let value: Value = serde_json::from_slice(body).ok()?;
     usage_from_value(&value)
 }
 
-/// 从任意 JSON 值提取 OpenAI 兼容 `usage` 对象。
+/// Extracts an OpenAI-compatible `usage` object from any JSON value.
 fn usage_from_value(value: &Value) -> Option<Usage> {
     let usage = value.get("usage")?;
     let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
@@ -217,7 +219,7 @@ fn usage_from_value(value: &Value) -> Option<Usage> {
     )
 }
 
-/// 流式 usage 扫描器：累积不完整行，仅用于解析 usage，不透传修改原始字节。
+/// Streaming usage scanner: accumulates incomplete lines, only used to parse usage, never modifying the relayed bytes.
 struct SseUsageScanner {
     pending: Vec<u8>,
 }
@@ -229,7 +231,7 @@ impl SseUsageScanner {
         }
     }
 
-    /// 传入一个新 chunk，返回从其中完整 `data:` 行解析出的 usage（如有）。
+    /// Feeds a new chunk and returns usage parsed from complete `data:` lines within it (if any).
     fn push(&mut self, chunk: &[u8]) -> Option<Usage> {
         self.pending.extend_from_slice(chunk);
         let mut usage = None;
@@ -250,7 +252,7 @@ impl SseUsageScanner {
     }
 }
 
-/// 解析单条 SSE `data:` 行，返回其 JSON 载荷字节（`[DONE]` 与非法行返回 None）。
+/// Parses a single SSE `data:` line, returning its JSON payload bytes (`[DONE]` and invalid lines return None).
 fn parse_sse_data_line(line: &[u8]) -> Option<&[u8]> {
     let text = std::str::from_utf8(line).ok()?.trim();
     let payload = text.strip_prefix("data:")?.trim();
@@ -278,7 +280,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::providers::test_util;
 
-    /// 构造 OpenAI 兼容非流式响应样本（含 usage）。
+    /// Builds a sample OpenAI-compatible non-streaming response (with usage).
     fn chat_completion_response() -> Value {
         json!({
             "id": "chatcmpl-123",
@@ -294,7 +296,7 @@ mod tests {
         })
     }
 
-    /// 连通性测试：2xx 视为成功。
+    /// Connectivity test: 2xx counts as success.
     #[tokio::test]
     async fn test_reports_ok_on_success() {
         let router = Router::new().route("/models", get(|| async { Json(json!({"data": []})) }));
@@ -309,7 +311,7 @@ mod tests {
         assert_eq!(result.error, None);
     }
 
-    /// 连通性测试：上游 4xx/5xx 视为失败并携带原因。
+    /// Connectivity test: upstream 4xx/5xx counts as failure and carries the reason.
     #[tokio::test]
     async fn test_reports_failure_on_upstream_error() {
         let router = Router::new().route("/models", get(|| async { StatusCode::UNAUTHORIZED }));
@@ -327,7 +329,7 @@ mod tests {
         );
     }
 
-    /// 非流式转发：请求体原样透传，响应透传并解析 usage。
+    /// Non-streaming forward: the request body is relayed as-is; the response is relayed and usage is parsed.
     #[tokio::test]
     async fn forward_passes_body_and_parses_usage() {
         let received: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
@@ -368,7 +370,8 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["content"], "hello");
     }
 
-    /// 流式转发：上游 SSE 字节逐帧透传（拼接后不变），usage 从帧内完整行解析。
+    /// Streaming forward: upstream SSE bytes are relayed frame by frame (unchanged when concatenated); usage is
+    /// parsed from complete lines in frames.
     #[tokio::test]
     async fn forward_stream_relays_bytes_and_scans_usage() {
         let payload = concat!(
@@ -421,7 +424,8 @@ mod tests {
         );
     }
 
-    /// 上游错误（非流式）：401 错误体会回显所提交的密钥，必须替换为通用错误体而非透传。
+    /// Upstream error (non-streaming): a 401 error body echoes the submitted key; it must be replaced with a
+    /// generic error body rather than relayed.
     #[tokio::test]
     async fn forward_masks_upstream_error_body() {
         let router = Router::new().route(
@@ -455,7 +459,8 @@ mod tests {
         assert_eq!(resp.usage, None);
     }
 
-    /// 上游错误（流式）：非 2xx 错误体不原样透传，下发通用错误 SSE 帧（含 data: 行）。
+    /// Upstream error (streaming): non-2xx error bodies are not relayed verbatim; a generic error SSE frame
+    /// (with a data: line) is emitted.
     #[tokio::test]
     async fn forward_stream_masks_upstream_error_body() {
         let router = Router::new().route(
@@ -498,7 +503,8 @@ mod tests {
         );
     }
 
-    /// usage 扫描器：一条 `data:` 行跨多个 chunk 到达也能正确解析（行缓冲累计）。
+    /// usage scanner: a single `data:` line arriving across multiple chunks is still parsed correctly
+    /// (line-buffer accumulation).
     #[test]
     fn usage_scanner_handles_line_split_across_chunks() {
         let mut scanner = SseUsageScanner::new();

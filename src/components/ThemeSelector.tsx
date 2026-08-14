@@ -1,5 +1,5 @@
-// 主题三态选择器：light / dark / system 图标按钮组。顶栏与设置页共用。
-// 受控组件：theme 与 onChange 由调用方（useTheme）注入。
+// Theme tri-state selector: light / dark / system icon button group. Shared by the top bar and settings page.
+// Controlled component: theme and onChange are injected by the caller (useTheme).
 import type { LucideIcon } from "lucide-react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { type Theme, THEME_OPTIONS } from "@/lib/theme";

@@ -1,4 +1,4 @@
-//! 控制面：Tauri Commands（服务生命周期 + 渠道管理 + 密钥管理命令）。
+//! Control plane: Tauri Commands (service lifecycle + channel management + API key commands).
 
 pub mod api_key;
 pub mod channel;

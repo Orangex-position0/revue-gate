@@ -1,20 +1,20 @@
-//! 领域服务：渠道选择策略（ChannelSelector）——按模型筛选候选渠道 → 按优先级排序。
+//! Domain service: channel selection strategy (ChannelSelector) — filter candidate channels by model → sort by priority.
 //!
-//! 纯业务判断，不碰 DB 与 HTTP（见 docs/Architecture-backend.md）：
-//! 1. 只保留启用渠道（禁用渠道不参与调度）；
-//! 2. 模型匹配：渠道 `models` 包含请求模型、或 `model_mappings` 命中 `client_model`、
-//!    或 `models` 为空（不受限渠道接受任意模型）；
-//! 3. 按优先级升序稳定排序（数值越小越优先，同优先级保持输入顺序）。
+//! Pure business logic, no DB or HTTP (see docs/Architecture-backend.md):
+//! 1. Keep only enabled channels (disabled channels do not participate in dispatch);
+//! 2. Model matching: the channel `models` contains the requested model, or `model_mappings` hits `client_model`,
+//!    or `models` is empty (unrestricted channels accept any model);
+//! 3. Stable sort ascending by priority (smaller values take precedence, same priority keeps input order).
 //!
-//! 编排职责（查找渠道、按序重试、应用映射）在 usecases/proxy.rs。
+//! Orchestration (finding channels, retrying in order, applying mappings) lives in usecases/proxy.rs.
 
 use super::channel::Channel;
 
-/// 渠道选择策略领域服务：从全部渠道中筛出候选渠道并排序。
+/// Domain service for the channel selection strategy: filter candidate channels from all channels and sort them.
 pub struct ChannelSelector;
 
 impl ChannelSelector {
-    /// 选出候选渠道：启用 → 模型匹配 → 优先级升序。
+    /// Select candidate channels: enabled → model match → ascending priority.
     pub fn select(channels: &[Channel], model: &str) -> Vec<Channel> {
         let mut candidates: Vec<Channel> = channels
             .iter()
@@ -25,8 +25,8 @@ impl ChannelSelector {
         candidates
     }
 
-    /// 渠道是否可服务该客户端模型：`models` 非空时要求包含请求模型或有 `client_model`
-    /// 映射命中；`models` 为空视为不受限，接受任意模型。
+    /// Whether the channel can serve the client model: when `models` is non-empty it must contain the requested model or have a `client_model`
+    /// mapping hit; an empty `models` is treated as unrestricted and accepts any model.
     pub fn supports(channel: &Channel, model: &str) -> bool {
         if channel.models.is_empty() {
             return true;
@@ -63,14 +63,14 @@ mod tests {
         c
     }
 
-    /// 禁用渠道不进入候选，即使模型匹配。
+    /// Disabled channels are not candidates, even when the model matches.
     #[test]
     fn select_drops_disabled_channels() {
         let channels = vec![channel("off", &["gpt-4o"], 0, false)];
         assert!(ChannelSelector::select(&channels, "gpt-4o").is_empty());
     }
 
-    /// `models` 包含请求模型 → 入选。
+    /// `models` contains the requested model → selected.
     #[test]
     fn select_keeps_channel_when_model_in_models_list() {
         let channels = vec![channel("a", &["gpt-4o"], 1, true)];
@@ -79,7 +79,7 @@ mod tests {
         assert_eq!(selected[0].name, "a");
     }
 
-    /// `model_mappings.client_model` 命中 → 入选（映射名即客户端可用名）。
+    /// `model_mappings.client_model` hits → selected (the mapping name is the name available to the client).
     #[test]
     fn select_keeps_channel_via_mapping_client_model() {
         let channels = vec![mapped_channel("chat", "gpt-4o")];
@@ -87,14 +87,14 @@ mod tests {
         assert_eq!(selected.len(), 1);
     }
 
-    /// `models` 为空 = 不受限渠道，接受任意模型。
+    /// Empty `models` = unrestricted channel, accepts any model.
     #[test]
     fn select_keeps_unrestricted_channel_with_empty_models() {
         let channels = vec![channel("any", &[], 0, true)];
         assert_eq!(ChannelSelector::select(&channels, "anything-else").len(), 1);
     }
 
-    /// 模型不被任何列表 / 映射命中 → 剔除。
+    /// Model not hit by any list / mapping → dropped.
     #[test]
     fn select_drops_channel_not_supporting_model() {
         let channels = vec![
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(selected[0].name, "b");
     }
 
-    /// 候选按优先级升序（数值越小越优先）；同优先级保持输入顺序（稳定排序）。
+    /// Candidates sorted ascending by priority (smaller values take precedence); same priority keeps input order (stable sort).
     #[test]
     fn select_sorts_by_priority_ascending_and_is_stable() {
         let mut a = channel("a", &["gpt-4o"], 5, true);
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(names, vec!["b", "c1", "c2", "a"], "优先级升序且同级稳定");
     }
 
-    /// 无启用 / 无匹配渠道时返回空候选。
+    /// Returns empty candidates when no enabled / matching channels exist.
     #[test]
     fn select_empty_when_no_candidates() {
         let channels = vec![channel("a", &["claude-3"], 0, true)];

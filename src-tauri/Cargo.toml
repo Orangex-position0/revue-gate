@@ -42,11 +42,11 @@ tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 
 [dev-dependencies]
-# 序列化 / 解析往返不变量（强制档 PBT，见 rules/property-based-testing.md）
+# Serialization/parsing round-trip invariants (mandatory-tier PBT, see rules/property-based-testing.md)
 proptest = "1"
 
-# Clippy 基线：all 组提升为显式 warn（配合 hook 的 -D warnings 生效），
-# 禁止 TODO/未实现占位提交（rust-workflow 单 crate 默认，见 rules/rust/rust-workflow-standards.md）
+# Clippy baseline: all group promoted to explicit warn (takes effect with the hook's -D warnings),
+# blocks TODO/unimplemented placeholder commits (rust-workflow single-crate default, see rules/rust/rust-workflow-standards.md)
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 todo = "deny"

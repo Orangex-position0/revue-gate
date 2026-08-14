@@ -1,12 +1,12 @@
-// 密钥表单弹窗：新建 / 编辑共用一个表单（initial 为空 = 新建，否则 = 编辑）。
-// 密钥本身不可由表单指定（后端生成）；编辑时不预填密钥。配额上限留空 = 无上限。
+// API key form modal: one form shared by create / edit (initial null = create, otherwise = edit).
+// The key itself cannot be set via the form (the backend generates it); it is not pre-filled on edit. Empty quota limit = unlimited.
 import { useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { apiKeyApi, invokeErrorMessage } from "@/lib/api";
 import type { ApiKey, ApiKeyInput } from "@/types";
 
 interface ApiKeyFormProps {
-  /** 编辑目标；null = 新建模式。 */
+  /** Edit target; null = create mode. */
   initial: ApiKey | null;
   onCancel: () => void;
   onSaved: (saved: ApiKey) => void;

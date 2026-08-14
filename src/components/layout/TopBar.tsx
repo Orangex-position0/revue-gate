@@ -1,4 +1,4 @@
-// 顶栏：当前页面标题 + 服务状态灯（useServerStore 驱动）+ 主题三态切换。
+// Top bar: current page title + server status indicator (driven by useServerStore) + theme tri-state switch.
 import { useLocation } from "react-router-dom";
 import { ThemeSelector } from "@/components/ThemeSelector";
 import { useTheme } from "@/hooks/use-theme";
@@ -18,7 +18,7 @@ export function TopBar() {
       <h1 className="text-base font-semibold">{currentLabel}</h1>
 
       <div className="flex items-center gap-4">
-        {/* 服务状态灯：store 只由 server 事件写入，状态灯与后端启停一致 */}
+        {/* Server status indicator: the store is written only by server events, so the indicator stays in sync with the backend */}
         <div
           className="flex items-center gap-2 text-sm"
           title={running ? `数据面监听 ${endpoint}` : "数据面未启动"}
@@ -31,7 +31,7 @@ export function TopBar() {
           <span className="text-muted-foreground">{endpoint}</span>
         </div>
 
-        {/* 主题三态：切换即 applyTheme 并持久化；system 由 CSS 媒体查询响应 */}
+        {/* Theme tri-state: switching applies the theme and persists it; system is handled by the CSS media query */}
         <ThemeSelector theme={theme} onChange={changeTheme} />
       </div>
     </header>

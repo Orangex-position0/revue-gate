@@ -1,9 +1,9 @@
-//! 请求日志查询用例：分页筛选 / 详情解析 / 按日期删除 / 清空编排。
+//! Request log query use cases: paginated filtering / detail parsing / delete-by-date / clear orchestration.
 //!
-//! 无状态用例：仓储以 `&dyn RequestLogRepository` 注入，seam A 测试可用内存 mock。
-//! 详情在用例层从请求体 JSON 解析「对话构成 / 请求参数 / 工具标签」（serde_json 解析，
-//! 领域层保持纯类型不引入解析逻辑，见 domain/request_log.rs）；路由字段（channel /
-//! upstream / usage / trace）直接来自 `RequestLog`，前端经既有渠道/密钥 API 反查名称。
+//! Stateless use cases: repositories are injected as `&dyn RequestLogRepository`, seam A tests can use in-memory mocks.
+//! Detail parsing extracts "conversation / request params / tool tags" from the request body JSON in the use case layer (serde_json parsing;
+//! the domain layer keeps pure types and introduces no parsing logic, see domain/request_log.rs); route fields (channel /
+//! upstream / usage / trace) come directly from `RequestLog`, and the frontend resolves names via the existing channel / key APIs.
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
 
-/// 日志用例层错误。
+/// Log use case layer error.
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
     #[error("request log not found")]
@@ -22,31 +22,31 @@ pub enum LogError {
     Repository(#[from] RepositoryError),
 }
 
-/// 日志详情：`RequestLog`（含路由 / usage / 原始 JSON）+ 从请求体解析出的结构化视图。
+/// Log detail: `RequestLog` (with route / usage / raw JSON) + the structured view parsed from the request body.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogDetail {
     #[serde(flatten)]
     pub log: RequestLog,
-    /// 对话构成：request_body.messages 的 role / content / 触发的工具调用。
+    /// Conversation: role / content / triggered tool calls of request_body.messages.
     pub conversation: Vec<ConversationMessage>,
-    /// 请求参数：request_body 顶层除 messages / tools / stream 之外的字段。
+    /// Request params: request_body top-level fields except messages / tools / stream.
     pub request_params: Value,
-    /// 工具标签：顶层 tools[].function.name 与各消息 tool_calls[].function.name 去重合并。
+    /// Tool tags: top-level tools[].function.name and each message's tool_calls[].function.name merged with dedup.
     pub tool_names: Vec<String>,
 }
 
-/// 一条对话消息（详情展示用；content 为文本或 None——空内容 / 非文本不展示）。
+/// A conversation message (for detail display; content is text or None — empty / non-text content is not shown).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
     pub role: String,
     pub content: Option<String>,
-    /// 该消息触发的工具调用名（assistant 消息的 tool_calls[].function.name）。
+    /// Tool call names triggered by this message (tool_calls[].function.name of assistant messages).
     pub tool_names: Vec<String>,
 }
 
-/// 分页查询日志：多条件筛选 + 页码，透传仓储实现（筛选语义唯一权威见 `LogQuery`）。
+/// Paginated log query: multi-condition filtering + page number, delegated to the repository implementation (see `LogQuery` for the single source of filter semantics).
 pub struct ListLogsUsecase;
 impl ListLogsUsecase {
     pub async fn execute(
@@ -60,7 +60,7 @@ impl ListLogsUsecase {
     }
 }
 
-/// 日志详情：按 id 加载，解析请求体为对话 / 参数 / 工具标签。未命中返回 `NotFound`。
+/// Log detail: load by id, parse the request body into conversation / params / tool tags. Returns `NotFound` if missing.
 pub struct GetLogDetailUsecase;
 impl GetLogDetailUsecase {
     pub async fn execute(
@@ -79,7 +79,7 @@ impl GetLogDetailUsecase {
     }
 }
 
-/// 删除创建时间严格早于 `before` 的日志（左闭右开上界），返回删除条数。
+/// Delete logs with created_at strictly before `before` (half-open upper bound), returning the number of deleted rows.
 pub struct DeleteLogsBeforeUsecase;
 impl DeleteLogsBeforeUsecase {
     pub async fn execute(
@@ -91,7 +91,7 @@ impl DeleteLogsBeforeUsecase {
     }
 }
 
-/// 清空全部请求日志，返回删除条数。
+/// Clear all request logs, returning the number of deleted rows.
 pub struct ClearLogsUsecase;
 impl ClearLogsUsecase {
     pub async fn execute(&self, repo: &dyn RequestLogRepository) -> Result<u64, LogError> {
@@ -99,8 +99,8 @@ impl ClearLogsUsecase {
     }
 }
 
-/// 从日志请求体 JSON 解析出（对话构成, 请求参数, 工具标签）。
-/// 无 body / 非法 JSON / 非对象一律返回空值——详情仍可展示路由与原始 JSON，不因解析失败报错。
+/// Parse the log request body JSON into (conversation, request params, tool tags).
+/// Missing body / invalid JSON / non-object all return empty values — the detail can still show the route and raw JSON, and parsing failure does not error.
 fn parse_detail(body: Option<&str>) -> (Vec<ConversationMessage>, Value, Vec<String>) {
     let Some(body) = body else {
         return (Vec::new(), Value::Null, Vec::new());
@@ -113,7 +113,7 @@ fn parse_detail(body: Option<&str>) -> (Vec<ConversationMessage>, Value, Vec<Str
     }
 
     let mut tool_names: Vec<String> = Vec::new();
-    // 顶层 tools[] 定义（声明但未必被调用）。
+    // Top-level tools[] definitions (declared but not necessarily called).
     if let Some(tools) = value.get("tools").and_then(Value::as_array) {
         for t in tools {
             if let Some(name) = t.pointer("/function/name").and_then(Value::as_str) {
@@ -122,7 +122,7 @@ fn parse_detail(body: Option<&str>) -> (Vec<ConversationMessage>, Value, Vec<Str
         }
     }
 
-    // 对话构成 + 各消息触发的工具调用（同时并入全局工具标签）。
+    // Conversation + tool calls triggered by each message (also merged into the global tool tags).
     let conversation = value
         .get("messages")
         .and_then(Value::as_array)
@@ -153,7 +153,7 @@ fn parse_detail(body: Option<&str>) -> (Vec<ConversationMessage>, Value, Vec<Str
         })
         .unwrap_or_default();
 
-    // 请求参数：顶层除 messages / tools / stream 之外的字段（stream 由日志 is_stream 承载）。
+    // Request params: top-level fields except messages / tools / stream (stream is carried by the log's is_stream).
     let mut params = value.clone();
     if let Some(obj) = params.as_object_mut() {
         obj.remove("messages");
@@ -164,7 +164,7 @@ fn parse_detail(body: Option<&str>) -> (Vec<ConversationMessage>, Value, Vec<Str
     (conversation, params, tool_names)
 }
 
-/// 追加去重（保持首次出现顺序）。
+/// Append with dedup (keeps first-occurrence order).
 fn push_unique(seen: &mut Vec<String>, name: &str) {
     if !seen.iter().any(|s| s == name) {
         seen.push(name.to_string());
@@ -178,7 +178,7 @@ mod tests {
     use super::*;
     use crate::test_support::{InMemoryRequestLogRepository, all_request_logs, sample_request_log};
 
-    /// 构造一条带消息 / 参数 / 工具的请求体样本。
+    /// Build a sample request body with messages / params / tools.
     fn sample_body() -> String {
         serde_json::json!({
             "model": "gpt-4o",
@@ -200,7 +200,7 @@ mod tests {
         .to_string()
     }
 
-    /// 详情解析：对话构成按序提取 role/content，工具标签去重合并（顶层定义 + 消息内调用）。
+    /// Detail parsing: the conversation extracts role/content in order, tool tags merge with dedup (top-level definitions + message calls).
     #[tokio::test]
     async fn get_log_detail_parses_conversation_and_tools() {
         let repo = InMemoryRequestLogRepository::new();
@@ -216,23 +216,23 @@ mod tests {
             .await
             .expect("detail");
 
-        // 对话构成：4 条消息按序。
+        // Conversation: 4 messages in order.
         assert_eq!(detail.conversation.len(), 4);
         assert_eq!(detail.conversation[0].role, "system");
         assert_eq!(detail.conversation[0].content.as_deref(), Some("be brief"));
         assert_eq!(detail.conversation[1].role, "user");
-        // 工具调用消息：content 为空，tool_names 携带工具名。
+        // Tool call message: content is empty, tool_names carries the tool names.
         assert_eq!(detail.conversation[2].role, "assistant");
         assert_eq!(detail.conversation[2].content, None);
         assert_eq!(detail.conversation[2].tool_names, vec!["get_weather"]);
-        // 工具结果消息：role=tool。
+        // Tool result message: role=tool.
         assert_eq!(detail.conversation[3].role, "tool");
         assert_eq!(detail.conversation[3].content.as_deref(), Some("sunny"));
 
-        // 工具标签：顶层定义 + 消息调用，去重且保持首次出现顺序。
+        // Tool tags: top-level definitions + message calls, deduped and keeping first-occurrence order.
         assert_eq!(detail.tool_names, vec!["get_weather", "get_time"]);
 
-        // 路由字段回显。
+        // Route fields echoed.
         assert_eq!(detail.log.trace_id, "trace-detail");
         assert_eq!(
             detail.log.upstream_model.as_deref(),
@@ -240,7 +240,7 @@ mod tests {
         );
     }
 
-    /// 请求参数：剔除 messages / tools / stream 后保留顶层参数。
+    /// Request params: keep top-level params after removing messages / tools / stream.
     #[tokio::test]
     async fn get_log_detail_keeps_top_level_params() {
         let repo = InMemoryRequestLogRepository::new();
@@ -263,7 +263,7 @@ mod tests {
         );
     }
 
-    /// 无请求体：详情仍返回（对话 / 参数 / 工具为空），路由字段可读。
+    /// No request body: the detail still returns (conversation / params / tools empty), route fields readable.
     #[tokio::test]
     async fn get_log_detail_without_body_returns_empty_views() {
         let repo = InMemoryRequestLogRepository::new();
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(detail.log.status_code, 200);
     }
 
-    /// 非法 JSON 请求体：视为无结构化视图，不报错（原始 JSON 仍在 log.request_body）。
+    /// Invalid JSON body: treated as having no structured view, no error (the raw JSON is still in log.request_body).
     #[tokio::test]
     async fn get_log_detail_tolerates_invalid_json_body() {
         let repo = InMemoryRequestLogRepository::new();
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(detail.request_params, Value::Null);
     }
 
-    /// 未知 id：返回 NotFound。
+    /// Unknown id: returns NotFound.
     #[tokio::test]
     async fn get_log_detail_unknown_id_errors_not_found() {
         let repo = InMemoryRequestLogRepository::new();
@@ -306,7 +306,7 @@ mod tests {
         ));
     }
 
-    /// 分页查询：透传筛选与分页到仓储，total 为命中总数，最新在前。
+    /// Paginated query: delegates filtering and pagination to the repository, total is the match count, newest first.
     #[tokio::test]
     async fn list_logs_delegates_query_and_pagination() {
         let repo = InMemoryRequestLogRepository::new();
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(page.items[0].trace_id, "b", "最新在前");
     }
 
-    /// 按日期删除：严格早于阈值删除，返回删除条数。
+    /// Delete by date: deletes rows strictly before the threshold, returning the count.
     #[tokio::test]
     async fn delete_before_delegates_and_returns_count() {
         let repo = InMemoryRequestLogRepository::new();
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(n, 1);
     }
 
-    /// 清空：全部删除并返回条数。
+    /// Clear: deletes all and returns the count.
     #[tokio::test]
     async fn clear_logs_empties_repo() {
         let repo = InMemoryRequestLogRepository::new();

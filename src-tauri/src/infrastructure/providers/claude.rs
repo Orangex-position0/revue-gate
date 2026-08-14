@@ -1,8 +1,9 @@
-//! Claude 适配器：OpenAI 兼容请求 ↔ Anthropic Messages API 协议转换。
+//! Claude adapter: OpenAI-compatible request ↔ Anthropic Messages API protocol conversion.
 //!
-//! 请求转换：system 消息拆到独立 `system` 字段、其余 messages 映射、`max_tokens` 缺失时注入默认值；
-//! 非流式响应把 Anthropic 结构转为 OpenAI `chat.completion`；流式把 Anthropic SSE 事件逐条转成
-//! OpenAI `chat.completion.chunk` 并合成 `[DONE]` 收尾。转换逻辑限定在本文件。
+//! Request conversion: system messages split into the separate `system` field, remaining messages mapped,
+//! `max_tokens` injected with a default when missing; non-streaming responses convert the Anthropic
+//! structure to OpenAI `chat.completion`; streaming converts Anthropic SSE events one by one to OpenAI
+//! `chat.completion.chunk` and appends `[DONE]`. Conversion logic is confined to this file.
 
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use crate::infrastructure::providers::{
     upstream_error_body, upstream_error_event,
 };
 
-/// Claude 适配器：默认 Base URL `https://api.anthropic.com`，模型列表供渠道表单预填。
+/// Claude adapter: default Base URL `https://api.anthropic.com`; the model list pre-fills the channel form.
 pub struct ClaudeAdaptor {
     client: Client,
 }
@@ -41,9 +42,9 @@ impl Default for ClaudeAdaptor {
     }
 }
 
-/// Claude Messages API 需要 `max_tokens`，OpenAI 请求可能不携带，此处注入默认值。
+/// The Claude Messages API requires `max_tokens`, which OpenAI requests may not carry; inject a default here.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
-/// Anthropic API 版本头（官方要求携带）。
+/// Anthropic API version header (officially required).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[async_trait::async_trait]
@@ -64,7 +65,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
         Some("https://api.anthropic.com")
     }
 
-    /// 连通性测试：`GET {base_url}/v1/models`（Claude 模型列表端点）。
+    /// Connectivity test: `GET {base_url}/v1/models` (Claude model list endpoint).
     async fn test(&self, channel: &Channel) -> Result<TestResult, ProviderError> {
         let base_url = resolve_base_url(channel, self.default_base_url())?;
         let api_key = require_api_key(channel)?;
@@ -98,7 +99,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
         })
     }
 
-    /// 非流式转发：转换请求 → POST `/v1/messages` → 转换响应为 OpenAI 格式并解析 usage。
+    /// Non-streaming forward: convert request → POST `/v1/messages` → convert response to OpenAI format and parse usage.
     async fn forward(
         &self,
         channel: &Channel,
@@ -119,7 +120,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         let status_code = resp.status().as_u16();
         if status_code >= 400 {
-            // 上游错误体原样透传会带回显密钥的风险，统一替换为通用错误体（红线）。
+            // Relaying the upstream error body verbatim risks echoing the key; replace it with a generic error body (red line).
             return Ok(ProviderResponse {
                 status_code,
                 body: upstream_error_body(status_code),
@@ -143,7 +144,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
         })
     }
 
-    /// 流式转发：转换请求 → POST `/v1/messages`（stream: true）→ 逐事件转 OpenAI chunk。
+    /// Streaming forward: convert request → POST `/v1/messages` (stream: true) → convert each event to an OpenAI chunk.
     async fn forward_stream(
         &self,
         channel: &Channel,
@@ -163,7 +164,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
-            // 丢弃上游错误体（可能回显密钥），下发通用错误 SSE 帧（红线）。
+            // Drop the upstream error body (may echo the key), emit a generic error SSE frame (red line).
             let status = resp.status().as_u16();
             return Ok(Box::pin(stream::once(async move {
                 Ok(upstream_error_event(status))
@@ -176,7 +177,7 @@ impl ProviderAdaptor for ClaudeAdaptor {
     }
 }
 
-/// 把 OpenAI 兼容请求转为 Anthropic Messages 请求体。
+/// Converts an OpenAI-compatible request into an Anthropic Messages request body.
 fn to_anthropic_request(request: &ChatRequest) -> Result<Value, ProviderError> {
     let messages = request
         .body
@@ -193,7 +194,7 @@ fn to_anthropic_request(request: &ChatRequest) -> Result<Value, ProviderError> {
             .unwrap_or("user");
         let content = extract_text_content(message.get("content"));
         match role {
-            // system 消息拆到独立 `system` 字段。
+            // System messages split into the separate `system` field.
             "system" => {
                 if let Some(text) = content {
                     system_texts.push(text);
@@ -203,7 +204,7 @@ fn to_anthropic_request(request: &ChatRequest) -> Result<Value, ProviderError> {
                 "role": "assistant",
                 "content": content.unwrap_or_default(),
             })),
-            // tool / function / developer 等无对应语义的消息兜底为 user（MVP 取舍）。
+            // Messages with no matching semantics (tool / function / developer) fall back to user (MVP trade-off).
             _ => anthropic_messages.push(json!({
                 "role": "user",
                 "content": content.unwrap_or_default(),
@@ -235,7 +236,7 @@ fn to_anthropic_request(request: &ChatRequest) -> Result<Value, ProviderError> {
     Ok(anthropic)
 }
 
-/// 把 Anthropic 非流式响应转为 OpenAI `chat.completion` 格式。
+/// Converts a non-streaming Anthropic response to the OpenAI `chat.completion` format.
 fn anthropic_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError> {
     let id = resp.get("id").and_then(Value::as_str).unwrap_or("msg");
     let content = resp
@@ -266,7 +267,7 @@ fn anthropic_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError
     }))
 }
 
-/// 从 Anthropic 响应提取 usage（`input_tokens` → prompt，`output_tokens` → completion）。
+/// Extracts usage from an Anthropic response (`input_tokens` → prompt, `output_tokens` → completion).
 fn usage_from_anthropic(resp: &Value) -> Option<Usage> {
     let usage = resp.get("usage")?;
     let prompt = usage.get("input_tokens").and_then(Value::as_u64);
@@ -284,16 +285,18 @@ fn usage_from_anthropic(resp: &Value) -> Option<Usage> {
     )
 }
 
-/// 把 Anthropic 流式 SSE 逐事件转成 OpenAI chunk，流结束合成 `[DONE]`。
-/// 状态（行缓冲 / message id / stop_reason / prompt_tokens / 是否已发 [DONE]）在 unfold 闭包内自持。
+/// Converts Anthropic streaming SSE events one by one into OpenAI chunks, appending `[DONE]` at stream end.
+/// State (line buffer / message id / stop_reason / prompt_tokens / whether [DONE] was emitted) is held
+/// inside the unfold closure.
 fn anthropic_sse_to_openai(
     byte_stream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
     model: String,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> + Send + 'static {
     let created = Utc::now().timestamp();
-    // Box::pin 使未 pinned 的 impl Stream 满足 unfold 内部 `.next()` 的 Unpin 约束。
+    // Box::pin makes the unpinned impl Stream satisfy the Unpin bound required by `.next()` inside unfold.
     let byte_stream = Box::pin(byte_stream);
-    // `model` 等放进状态元组（而非闭包捕获），否则 async 块无法在其内部借用。
+    // `model` etc. go into the state tuple (rather than being captured by the closure); otherwise the
+    // async block cannot borrow it inside.
     futures_util::stream::unfold(
         (
             byte_stream,
@@ -382,9 +385,9 @@ fn anthropic_sse_to_openai(
     )
 }
 
-/// 处理一条 Anthropic SSE `data:` 行，返回要透传的 OpenAI chunk（无输出时返回 None）。
-/// `stop_reason` 由 message_delta 捕获、message_stop 消费；`prompt_tokens` 由 message_start 捕获、
-/// message_delta 合并进 usage。
+/// Processes one Anthropic SSE `data:` line, returning the OpenAI chunk to relay (None when there is no output).
+/// `stop_reason` is captured by message_delta and consumed by message_stop; `prompt_tokens` is captured by
+/// message_start and merged into usage by message_delta.
 fn process_anthropic_line(
     line: &[u8],
     model: &str,
@@ -401,7 +404,7 @@ fn process_anthropic_line(
             if let Some(id) = value.pointer("/message/id").and_then(Value::as_str) {
                 *message_id = Some(id.to_string());
             }
-            // 流式场景 prompt 计数只在 message_start 出现一次，捕获后合并进末次 usage。
+            // In streaming, the prompt count appears only once at message_start; capture it and merge it into the final usage.
             if let Some(input) = value
                 .pointer("/message/usage/input_tokens")
                 .and_then(Value::as_u64)
@@ -425,7 +428,7 @@ fn process_anthropic_line(
             }
         }
         Some("message_delta") => {
-            // stop_reason 决定结束帧的 finish_reason（max_tokens → length）。
+            // stop_reason decides the finish_reason of the end frame (max_tokens → length).
             if let Some(r) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
                 *stop_reason = Some(r.to_string());
             }
@@ -481,7 +484,7 @@ mod tests {
     use crate::domain::channel::ChannelType;
     use crate::infrastructure::providers::test_util;
 
-    /// 连通性测试：`GET /v1/models` 2xx 视为成功。
+    /// Connectivity test: `GET /v1/models` 2xx counts as success.
     #[tokio::test]
     async fn test_reports_ok_on_success() {
         let router = Router::new().route("/v1/models", get(|| async { Json(json!({"data": []})) }));
@@ -496,8 +499,8 @@ mod tests {
         assert_eq!(result.error, None);
     }
 
-    /// 非流式转发：请求被转成 Anthropic Messages 格式（system 拆出、max_tokens 注入），
-    /// 响应转回 OpenAI 格式并解析 usage。
+    /// Non-streaming forward: the request is converted to the Anthropic Messages format (system split out,
+    /// max_tokens injected), and the response is converted back to the OpenAI format with usage parsed.
     #[tokio::test]
     async fn forward_converts_request_and_response() {
         let received: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
@@ -567,7 +570,7 @@ mod tests {
         );
     }
 
-    /// 流式转发：Anthropic SSE 事件逐条转成 OpenAI chunk，`[DONE]` 收尾。
+    /// Streaming forward: Anthropic SSE events are converted one by one into OpenAI chunks, ending with `[DONE]`.
     #[tokio::test]
     async fn forward_stream_converts_sse_to_chunks() {
         let payload = concat!(
@@ -645,8 +648,8 @@ mod tests {
         );
     }
 
-    /// 上游错误：非 2xx 响应体不原样透传（防止上游在错误体回显密钥），
-    /// 替换为通用错误体并保留状态码。
+    /// Upstream error: non-2xx response bodies are not relayed verbatim (prevents the upstream echoing the
+    /// key in the error body); replaced with a generic error body while keeping the status code.
     #[tokio::test]
     async fn forward_sanitizes_upstream_error_body() {
         let router = Router::new().route(
@@ -680,8 +683,8 @@ mod tests {
         assert_eq!(resp.usage, None);
     }
 
-    /// 流式转发（max_tokens 截断）：finish_reason 映射为 length，usage 合并 message_start
-    /// 的 prompt 计数与 message_delta 的 completion 计数。
+    /// Streaming forward (max_tokens truncation): finish_reason maps to length; usage merges the prompt
+    /// count from message_start with the completion count from message_delta.
     #[tokio::test]
     async fn forward_stream_maps_length_finish_and_full_usage() {
         let payload = concat!(

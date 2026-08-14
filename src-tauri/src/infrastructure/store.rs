@@ -1,9 +1,10 @@
-//! 基础设施层设置仓储：基于 tauri-plugin-store 的 JSON 文件持久化实现。
+//! Infrastructure settings repository: a JSON file persistence implementation based on tauri-plugin-store.
 //!
-//! 实现 domain 的 `SettingsRepository` trait（依赖倒置：infrastructure → domain）。
-//! 设置整体以 `gateway` 键存于 `settings.json`（AppData 目录）；`load` 无值或解析失败时
-//! 回退默认设置（`#[serde(default)]` 保证旧版 JSON 缺字段时向前兼容）。`save` 在
-//! `set` 触发异步自动保存之后显式 `save()` 落盘，保证命令返回时设置已持久化。
+//! Implements the domain `SettingsRepository` trait (dependency inversion: infrastructure → domain).
+//! Settings are stored as a whole under the `gateway` key in `settings.json` (AppData directory); `load` falls back
+//! to defaults when the value is missing or fails to parse (`#[serde(default)]` keeps old JSON forward-compatible);
+//! `save` explicitly calls `save()` to flush to disk after `set` triggers async auto-save, so settings are
+//! persisted by the time the command returns.
 
 use std::sync::Arc;
 
@@ -14,16 +15,16 @@ use tauri_plugin_store::Store;
 use crate::domain::error::RepositoryError;
 use crate::domain::settings::{GatewaySettings, SettingsRepository};
 
-/// 设置快照在 store 文件中的顶层键。
+/// Top-level key of the settings snapshot in the store file.
 const SETTINGS_KEY: &str = "gateway";
 
-/// 基于 tauri-plugin-store 的设置仓储。
+/// Settings repository based on tauri-plugin-store.
 pub struct StoreSettingsRepository {
     store: Arc<Store<Wry>>,
 }
 
 impl StoreSettingsRepository {
-    /// 构造：持有一个已构建（并自动加载磁盘内容）的 Store。
+    /// Constructor: holds a Store that is already built (and auto-loaded from disk).
     pub fn new(store: Arc<Store<Wry>>) -> Self {
         Self { store }
     }
@@ -45,7 +46,8 @@ impl SettingsRepository for StoreSettingsRepository {
     }
 }
 
-/// 把 store 插件 / serde 错误归一为仓储错误（错误信息字符串化，不泄漏内部类型到 domain）。
+/// Normalizes store plugin / serde errors into a repository error (message stringified; internal types not
+/// leaked to domain).
 fn repo_err(e: impl std::fmt::Display) -> RepositoryError {
     RepositoryError::Database(e.to_string())
 }

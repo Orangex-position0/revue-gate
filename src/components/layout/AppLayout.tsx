@@ -1,4 +1,4 @@
-// 应用外壳：侧边栏 + 顶栏 + 内容区（Outlet）。全部页面路由都渲染在此布局内。
+// App shell: sidebar + top bar + content area (Outlet). All page routes render inside this layout.
 import { Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";

@@ -1,4 +1,4 @@
-// 唯一全局 store：服务运行状态。只由 server 事件（lib/server-events.ts）写入，页面只读。
+// The only global store: server running status. Written only by server events (lib/server-events.ts); pages read it.
 import { create } from "zustand";
 import type { ServerStatus } from "@/types";
 

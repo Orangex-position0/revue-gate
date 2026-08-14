@@ -1,4 +1,4 @@
-# Logs（锚定根目录：避免命中 src/pages/logs/ 源码目录）
+# Logs (anchored to repo root: avoid matching the src/pages/logs/ source dir)
 /logs
 *.log
 npm-debug.log*
@@ -15,7 +15,7 @@ dist-ssr
 # Rust / Tauri
 /src-tauri/target
 
-# Scratch / 工作笔记（不提交，仅本地）
+# Scratch / working notes (local only, not committed)
 .scratch/
 
 # Editor directories and files

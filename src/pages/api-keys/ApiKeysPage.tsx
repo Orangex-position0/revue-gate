@@ -1,18 +1,18 @@
-// 密钥管理页：本地密钥列表 + CRUD / 启停 / 配额查看（ticket 05）。
-// 数据本地 useState + load()，CRUD 后就地刷新（同 ChannelsPage）。创建返回的密钥明文
-// 只在创建后一次性展示（create 返回明文，其余路径后端已遮蔽为占位符），关闭后不可再见。
+// API key management page: local key list + CRUD / enable-disable / quota view (ticket 05).
+// Data is local useState + load(), refreshed in place after CRUD (same as ChannelsPage). The plaintext returned on create
+// is shown only once after creation (create returns plaintext; the backend masks it to a placeholder on all other paths); it cannot be seen again after closing.
 import { useCallback, useEffect, useState } from "react";
 import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { apiKeyApi, invokeErrorMessage } from "@/lib/api";
 import type { ApiKey } from "@/types";
 
-/** 表单状态：null = 关闭；{ key: null } = 新建；{ key } = 编辑。 */
+/** Form state: null = closed; { key: null } = create; { key } = edit. */
 type FormState = { key: ApiKey | null } | null;
 
 const cellCls = "px-3 py-2 align-middle text-sm";
 
-/** 已用 / 上限的展示文案：无上限时只显示已用额度。 */
+/** Used / limit display text: shows only the used amount when unlimited. */
 function quotaLabel(key: ApiKey): string {
   const { used, limit } = key.quota;
   return limit == null ? `${used} / 无上限` : `${used} / ${limit}`;
@@ -23,7 +23,7 @@ export function ApiKeysPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
-  /** 刚创建的密钥明文（一次性展示弹窗）；null = 无。 */
+  /** Plaintext of the just-created key (shown once in a modal); null = none. */
   const [createdKey, setCreatedKey] = useState<ApiKey | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -42,8 +42,8 @@ export function ApiKeysPage() {
     void load();
   }, [load]);
 
-  /** 保存回调：关闭表单后重拉列表；新建时弹出一次性明文展示。
-   *  创建 / 编辑在打开表单时由 `form.key === null` 区分，故此处可直接判定。 */
+  /** Save callback: close the form and re-fetch the list; show the one-time plaintext on create.
+   *  Create / edit are distinguished when the form opens by `form.key === null`, so this can be determined directly here. */
   function handleSaved(saved: ApiKey) {
     const isCreate = form?.key === null;
     setForm(null);
@@ -64,7 +64,7 @@ export function ApiKeysPage() {
     }
   }
 
-  /** 启停：调 set_api_key_enabled，用返回状态就地替换，保证与数据库一致。 */
+  /** Enable/disable: call set_api_key_enabled and replace in place with the returned state, keeping it consistent with the database. */
   async function handleToggle(key: ApiKey) {
     try {
       const updated = await apiKeyApi.setEnabled(key.id, !key.enabled);

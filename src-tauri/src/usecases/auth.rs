@@ -1,28 +1,28 @@
-//! 认证用例：Bearer 密钥认证 + 配额校验。
+//! Auth use cases: Bearer key authentication + quota check.
 //!
-//! `AuthenticateRequestUsecase` 校验 HTTP 请求携带的本地密钥：无 / 无效 / 停用密钥返回
-//! `Unauthorized`（应映射为 HTTP 401），配额超限返回 `QuotaExceeded`（应映射为 429）。
-//! Bearer 前缀剥离由数据面 handler 完成，本用例接收已提取的 token（`None` 表示请求
-//! 无有效 Authorization 头）。密钥查找走 `ApiKeyRepository` trait（seam A 可 mock）。
+//! `AuthenticateRequestUsecase` validates the local key carried by the HTTP request: missing / invalid / disabled keys return
+//! `Unauthorized` (mapped to HTTP 401), quota exceeded returns `QuotaExceeded` (mapped to 429).
+//! Bearer prefix stripping is done by the data-plane handler; this use case receives the already-extracted token (`None` means the request
+//! has no valid Authorization header). Key lookup goes through the `ApiKeyRepository` trait (seam A can be mocked).
 
 use crate::domain::api_key::{ApiKey, ApiKeyRepository};
 use crate::domain::error::RepositoryError;
 use crate::domain::quota::{QuotaCheck, QuotaPolicy};
 
-/// 认证用例层错误：分支与数据面 HTTP 状态码一一对应（401 / 429）。
+/// Auth use case layer error: variants map one-to-one to data-plane HTTP status codes (401 / 429).
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("invalid or missing api key")]
-    /// 无 / 无效 / 停用密钥，应返回 401。
+    /// Missing / invalid / disabled key, should return 401.
     Unauthorized,
     #[error("quota exceeded")]
-    /// 配额超限，应返回 429。
+    /// Quota exceeded, should return 429.
     QuotaExceeded,
     #[error("api key repository error: {0}")]
     Repository(#[from] RepositoryError),
 }
 
-/// 认证用例：校验 Bearer 密钥并返回通过认证的密钥（供记账 / 日志使用）。
+/// Auth use case: validate the Bearer key and return the authenticated key (for billing / logging).
 pub struct AuthenticateRequestUsecase;
 impl AuthenticateRequestUsecase {
     pub async fn execute(
@@ -55,7 +55,7 @@ mod tests {
     use crate::domain::api_key::Quota;
     use crate::test_support::InMemoryApiKeyRepository;
 
-    /// 直接向内存仓储保存一条指定状态的密钥，返回其句柄（认证测试不需要走创建用例）。
+    /// Save a key with the given state directly to the in-memory repository and return its handle (auth tests do not need the create use case).
     async fn save_key(
         repo: &InMemoryApiKeyRepository,
         enabled: bool,
@@ -75,7 +75,7 @@ mod tests {
         api_key
     }
 
-    /// 无 Bearer（请求无 Authorization 头 / 格式非法）→ 401 Unauthorized。
+    /// Missing Bearer (no Authorization header / malformed) → 401 Unauthorized.
     #[tokio::test]
     async fn missing_bearer_is_unauthorized() {
         let repo = InMemoryApiKeyRepository::new();
@@ -86,7 +86,7 @@ mod tests {
         assert!(matches!(err, AuthError::Unauthorized));
     }
 
-    /// 无效密钥（库中不存在）→ 401 Unauthorized。
+    /// Invalid key (not in the repository) → 401 Unauthorized.
     #[tokio::test]
     async fn unknown_key_is_unauthorized() {
         let repo = InMemoryApiKeyRepository::new();
@@ -97,7 +97,7 @@ mod tests {
         assert!(matches!(err, AuthError::Unauthorized));
     }
 
-    /// 停用密钥 → 401 Unauthorized。
+    /// Disabled key → 401 Unauthorized.
     #[tokio::test]
     async fn disabled_key_is_unauthorized() {
         let repo = InMemoryApiKeyRepository::new();
@@ -109,7 +109,7 @@ mod tests {
         assert!(matches!(err, AuthError::Unauthorized));
     }
 
-    /// 有效密钥（启用 + 未超限）→ 返回该密钥（供记账 / 日志使用）。
+    /// Valid key (enabled + within quota) → returns the key (for billing / logging).
     #[tokio::test]
     async fn valid_key_returns_api_key() {
         let repo = InMemoryApiKeyRepository::new();
@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(authenticated.key, saved.key);
     }
 
-    /// 配额超限（used >= limit）→ 429 QuotaExceeded（边界值本身即超限）。
+    /// Quota exceeded (used >= limit) → 429 QuotaExceeded (the boundary value itself counts as exceeded).
     #[tokio::test]
     async fn quota_exceeded_is_quota_error() {
         let repo = InMemoryApiKeyRepository::new();
@@ -134,7 +134,7 @@ mod tests {
         assert!(matches!(err, AuthError::QuotaExceeded));
     }
 
-    /// 配额未超限（used < limit）→ 放行。
+    /// Quota not exceeded (used < limit) → allowed.
     #[tokio::test]
     async fn quota_not_exceeded_allows() {
         let repo = InMemoryApiKeyRepository::new();
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(authenticated.quota.used, 99);
     }
 
-    /// 无配额上限（limit = None）时任意已用额度都放行。
+    /// Any usage is allowed when there is no quota limit (limit = None).
     #[tokio::test]
     async fn no_limit_allows_any_usage() {
         let repo = InMemoryApiKeyRepository::new();

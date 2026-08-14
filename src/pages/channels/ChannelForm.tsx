@@ -1,6 +1,6 @@
-// 渠道表单弹窗：新建 / 编辑共用一个表单（initial 为空 = 新建，否则 = 编辑）。
-// 编辑时 apiKey 不预填，留空 = 保持原密钥（后端 update 语义，见 usecases/channel.rs）。
-// 模型列表以逗号分隔文本录入；模型映射为可增删的行编辑器。提交后回调 onSaved(channel)。
+// Channel form modal: one form shared by create / edit (initial null = create, otherwise = edit).
+// apiKey is not pre-filled on edit; empty = keep the original key (backend update semantics, see usecases/channel.rs).
+// The model list is entered as comma-separated text; model mappings use a row editor with add/remove. On submit, calls back onSaved(channel).
 import { useState, type FormEvent } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { CHANNEL_TYPE_LABELS } from "@/lib/constants";
@@ -8,7 +8,7 @@ import { channelApi, invokeErrorMessage } from "@/lib/api";
 import type { Channel, ChannelInput, ChannelType, ModelMapping } from "@/types";
 
 interface ChannelFormProps {
-  /** 编辑目标；null = 新建模式。 */
+  /** Edit target; null = create mode. */
   initial: Channel | null;
   onCancel: () => void;
   onSaved: (channel: Channel) => void;
@@ -18,7 +18,7 @@ const inputCls =
   "w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary";
 const labelCls = "block text-sm font-medium";
 
-/** 模型映射行：id 提供稳定 key（列表可增删，禁用 index key，见 react/patterns.md）。 */
+/** Model mapping row: id provides a stable key (the list can add/remove; index keys are forbidden, see react/patterns.md). */
 interface MappingRow {
   id: string;
   clientModel: string;

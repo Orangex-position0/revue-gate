@@ -1,13 +1,13 @@
-/* 全局样式入口：Tailwind 4 + 主题语义变量。
- * 主题三态：light（data-theme="light"）/ dark（data-theme="dark"）/ system（无 data-theme，由
- * @media (prefers-color-scheme: dark) 响应，零 JS 监听）。dark: 变体仅跟随显式 data-theme="dark"。
+/* Global styles entry: Tailwind 4 + theme semantic variables.
+ * Theme tri-state: light (data-theme="light") / dark (data-theme="dark") / system (no data-theme, handled by
+ * @media (prefers-color-scheme: dark), zero JS listeners). The dark: variant only follows an explicit data-theme="dark".
  */
 @import "tailwindcss";
 
-/* 显式深色：dark: 变体跟随 [data-theme="dark"]，与 lib/theme.ts 的 applyTheme 行为一致 */
+/* Explicit dark: the dark: variant follows [data-theme="dark"], consistent with applyTheme in lib/theme.ts */
 @custom-variant dark (&:where([data-theme="dark"]));
 
-/* 语义色彩令牌：把运行时 CSS 变量映射为 Tailwind 工具（bg-background / text-foreground / ...） */
+/* Semantic color tokens: map runtime CSS variables to Tailwind utilities (bg-background / text-foreground / ...) */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -23,7 +23,7 @@
   --color-danger: var(--danger);
 }
 
-/* 浅色默认值 */
+/* Light defaults */
 :root {
   --background: #f8fafc;
   --foreground: #1e293b;
@@ -39,7 +39,7 @@
   --danger: #dc2626;
 }
 
-/* 跟随系统：系统深色时套用深色值；显式浅色（data-theme="light"）时豁免 */
+/* Follow the system: apply dark values when the system is dark; exempt when light is explicit (data-theme="light") */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --background: #0f172a;
@@ -57,7 +57,7 @@
   }
 }
 
-/* 显式深色：data-theme="dark" 时套用深色值（覆盖跟随系统的媒体查询） */
+/* Explicit dark: apply dark values when data-theme="dark" (overrides the follow-system media query) */
 [data-theme="dark"] {
   --background: #0f172a;
   --foreground: #e2e8f0;
@@ -73,7 +73,7 @@
   --danger: #ef4444;
 }
 
-/* 基础排版：语义色由上面的变量驱动，主题切换只改变量不改组件 */
+/* Base typography: semantic colors are driven by the variables above; theme switches only change variables, never components */
 html,
 body,
 #root {

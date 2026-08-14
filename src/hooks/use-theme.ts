@@ -1,17 +1,17 @@
-// 主题 Hook：读取/更新主题，切换后立即 applyTheme，并持久化到后端设置（settingsApi）。
-// 后端是主题权威源：挂载时加载并校准；localStorage 仅作渲染前首帧缓存（main.tsx 预应用）。
-// 顶栏与设置页各持一份实例，各管各的加载；持久化在每次 changeTheme 时重新读取后端
-// 最新设置再合并主题，避免覆盖设置页刚保存的其它字段（不缓存会过期的设置快照）。
+// Theme hook: reads/updates the theme, applies it immediately on change, and persists to backend settings (settingsApi).
+// The backend is the theme source of truth: loaded and reconciled on mount; localStorage is only a pre-render first-frame cache (pre-applied in main.tsx).
+// The top bar and settings page each hold their own instance and manage their own loading; persistence re-reads the backend
+// latest settings on every changeTheme before merging the theme, avoiding overwriting other fields just saved by the settings page (no caching of a stale settings snapshot).
 import { useEffect, useRef, useState } from "react";
 import { settingsApi } from "@/lib/api";
 import { applyTheme, getStoredTheme, setStoredTheme, type Theme } from "@/lib/theme";
 
 export function useTheme() {
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
-  // 挂载加载完成前用户已手动切换过主题：不再用后端值覆盖（避免「点深色又弹回」）。
+  // If the user already switched the theme before the mount-time load finished, do not override with the backend value (avoids "click dark, it snaps back").
   const userChanged = useRef(false);
 
-  // 挂载时加载后端设置：校准主题（权威源）。
+  // On mount, load the backend settings to reconcile the theme (source of truth).
   useEffect(() => {
     let cancelled = false;
     settingsApi
@@ -20,13 +20,13 @@ export function useTheme() {
         if (cancelled) return;
         if (!userChanged.current) setTheme(settings.theme);
       })
-      .catch(() => {}); // 后端不可用（纯浏览器 dev）时保持 localStorage 兜底
+      .catch(() => {}); // keep localStorage as fallback when the backend is unavailable (pure browser dev)
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // 主题变化即应用（system 由 CSS 媒体查询响应）。
+  // Apply the theme on every change (system is handled by the CSS media query).
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
@@ -35,7 +35,7 @@ export function useTheme() {
     userChanged.current = true;
     setStoredTheme(next);
     setTheme(next);
-    // 持久化：每次先读后端最新设置再合并主题，失败静默（下次加载仍会校准）。
+    // Persistence: re-read the latest backend settings first, then merge the theme; failures are silent (the next load will reconcile anyway).
     void settingsApi
       .get()
       .then((settings) => settingsApi.save({ ...settings, theme: next }))

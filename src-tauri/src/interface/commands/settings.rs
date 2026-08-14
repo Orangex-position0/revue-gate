@@ -1,10 +1,11 @@
-//! 控制面：设置命令（get/save）。
+//! Control plane: settings commands (get/save).
 //!
-//! 命令只做薄胶水：`get_settings` 经用例读取仓储；`save_settings` 按「校验 →
-//! 应用 OS 侧开机自启 → 持久化 → 更新共享设置」顺序执行。校验 / 自启失败即整体
-//! 失败、零副作用；持久化失败时 OS 侧自启虽已改动，但下次启动会按已存配置重对齐。
-//! 共享设置（`Arc<RwLock<GatewaySettings>>`）是 host/port/retry 的即时生效源：
-//! 保存后 start_server / 托盘启动与代理重试立刻读到新值。
+//! Commands are thin glue: `get_settings` reads the repository via a usecase; `save_settings` runs
+//! "validate → apply OS auto-start → persist → update shared settings" in order. Validation or
+//! auto-start failure fails the whole call with zero side effects; if persistence fails, the OS
+//! auto-start is already changed but the next startup realigns to the stored config. Shared
+//! settings (`Arc<RwLock<GatewaySettings>>`) are the immediate source of host/port/retry:
+//! after save, start_server, tray start, and proxy retry read the new values at once.
 
 use std::sync::{Arc, RwLock};
 
@@ -14,7 +15,7 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::domain::settings::{GatewaySettings, SettingsRepository};
 use crate::usecases::settings::{GetSettingsUsecase, SaveSettingsUsecase, validate};
 
-/// 查询当前设置快照（未持久化值时返回默认设置）。
+/// Query the current settings snapshot (returns defaults when nothing is persisted).
 #[tauri::command]
 pub async fn get_settings(
     repo: tauri::State<'_, Arc<dyn SettingsRepository>>,
@@ -25,7 +26,7 @@ pub async fn get_settings(
         .map_err(|e| e.to_string())
 }
 
-/// 保存设置：校验 → 应用开机自启（OS 侧）→ 持久化 → 更新共享设置（即时生效）。
+/// Save settings: validate → apply OS auto-start → persist → update shared settings (effective immediately).
 #[tauri::command]
 pub async fn save_settings(app: tauri::AppHandle, settings: GatewaySettings) -> Result<(), String> {
     validate(&settings).map_err(|e| e.to_string())?;
@@ -35,14 +36,14 @@ pub async fn save_settings(app: tauri::AppHandle, settings: GatewaySettings) -> 
         .execute(&*repo, settings.clone())
         .await
         .map_err(|e| e.to_string())?;
-    // 写回用例返回的规范化值（host 已去空白），避免共享状态与持久化值分叉。
+    // Write back the normalized value returned by the usecase (host trimmed) so shared state and persisted value never diverge.
     *app.state::<Arc<RwLock<GatewaySettings>>>()
         .write()
         .expect("settings lock poisoned") = saved;
     Ok(())
 }
 
-/// 应用开机自启：仅在期望值与 OS 当前状态不一致时执行（避免重复写注册表/启动项）。
+/// Apply OS auto-start: only runs when the desired value differs from the OS state (avoids rewriting the registry/startup items).
 pub(crate) fn apply_autostart(
     app: &AppHandle,
     enabled: bool,
