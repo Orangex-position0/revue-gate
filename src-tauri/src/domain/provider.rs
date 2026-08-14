@@ -30,6 +30,26 @@ impl Usage {
             ..self
         }
     }
+
+    /// 合并两次用量：各字段按「两侧都有则求和、否则保留有的一侧」累加（饱和加法防溢出）。
+    /// 用于流式响应逐帧用量聚合（OpenAI 兼容流通常仅末帧携带，聚合结果即等价于取末帧）。
+    pub fn accumulate(self, other: Usage) -> Usage {
+        Usage {
+            prompt_tokens: opt_add(self.prompt_tokens, other.prompt_tokens),
+            completion_tokens: opt_add(self.completion_tokens, other.completion_tokens),
+            total_tokens: opt_add(self.total_tokens, other.total_tokens),
+        }
+    }
+}
+
+/// 两侧都有则饱和求和；仅一侧有则保留该侧；都无则 None。
+fn opt_add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.saturating_add(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
 }
 
 /// 转发到上游的请求：代理已应用模型映射并改写 `body["model"]`（见阶段 07 转发用例）。
@@ -72,7 +92,7 @@ pub struct TestResult {
 
 /// 供应商适配器错误：配置缺失与传输 / 解析失败。上游业务错误（4xx/5xx）不落此枚举——
 /// `forward` 原样返回状态码与 body，由转发用例决定重试。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     #[error("provider not configured: {0}")]
     NotConfigured(String),
@@ -104,4 +124,55 @@ pub trait ProviderAdaptor: Send + Sync {
         channel: &Channel,
         request: &ChatRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(prompt: Option<u64>, completion: Option<u64>, total: Option<u64>) -> Usage {
+        Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+        }
+    }
+
+    /// 两侧都有时按字段饱和求和（流式多帧用量累加）。
+    #[test]
+    fn accumulate_sums_fields_present_on_both_sides() {
+        let a = usage(Some(10), Some(5), Some(15));
+        let b = usage(Some(3), Some(2), Some(5));
+        assert_eq!(a.accumulate(b), usage(Some(13), Some(7), Some(20)));
+    }
+
+    /// 一侧缺失时保留有的一侧（各供应商用量字段不全时仍能聚合）。
+    #[test]
+    fn accumulate_keeps_present_side_when_other_missing() {
+        let a = usage(Some(10), None, None);
+        let b = usage(None, Some(2), Some(5));
+        assert_eq!(a.accumulate(b), usage(Some(10), Some(2), Some(5)));
+    }
+
+    /// 两侧都缺失时保持 None；空对象是恒等元。
+    #[test]
+    fn accumulate_none_fields_stay_none() {
+        let a = usage(None, None, None);
+        let b = usage(Some(1), None, None);
+        assert_eq!(a.accumulate(b), usage(Some(1), None, None));
+        assert_eq!(a.accumulate(a), usage(None, None, None));
+    }
+
+    /// total 缺失时由 prompt + completion 推导；已存在时不被覆盖。
+    #[test]
+    fn normalized_derives_total_from_parts_when_missing() {
+        assert_eq!(
+            usage(Some(10), Some(5), None).normalized(),
+            usage(Some(10), Some(5), Some(15))
+        );
+        assert_eq!(
+            usage(Some(10), Some(5), Some(20)).normalized(),
+            usage(Some(10), Some(5), Some(20))
+        );
+    }
 }

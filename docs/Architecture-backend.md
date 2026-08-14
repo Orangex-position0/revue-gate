@@ -111,6 +111,7 @@ src-tauri/src/
 每个文件对应一个业务用例，编排 domain 实体/领域服务 + 调仓储接口：
 
 - `proxy.rs` — 网关核心闭环：认证 → 选渠道 → 模型映射 → 转发 → 记账 → 写日志 → 失败重试
+- `models.rs` — 模型列表用例：启用渠道模型合并去重，禁用渠道剔除
 - `auth.rs` — Bearer 密钥认证 + 配额校验
 - `channel.rs` — 渠道 CRUD / 启停 / 连通性测试
 - `api_key.rs` — 密钥 CRUD / 配额管理

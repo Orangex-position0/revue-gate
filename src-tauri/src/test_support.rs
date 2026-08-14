@@ -3,7 +3,7 @@
 //! 供 usecases 编排测试引用（`crate::test_support::*`）：对 domain 的 Repository trait
 //! 提供内存实现，行为可控、无真实 DB。domain 纯逻辑经这些用例被覆盖（见 Spec §Testing）。
 
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -267,6 +267,89 @@ impl ProviderAdaptor for MockProviderAdaptor {
         Err(ProviderError::NotConfigured(
             "forward_stream not used in test-channel".into(),
         ))
+    }
+}
+
+/// 脚本化转发 mock：`forward` / `forward_stream` 按预设结果返回，供代理用例（proxy.rs）seam A 测试。
+/// 每次调用把收到的 `ChatRequest` 记入共享 recorder（测试侧持 Arc，可事后断言请求体/映射）。
+/// `forward` 返回 `Ok(status>=500 / 429)` 或 `Err` 即模拟一次「失败」以驱动重试。
+pub struct MockForwardAdaptor {
+    /// 非流式转发脚本结果。
+    forward: Result<ProviderResponse, ProviderError>,
+    /// 流式转发脚本结果：`Err` 表示打开流失败；`Ok(events)` 为逐帧事件序列。
+    stream: Result<Vec<Result<StreamEvent, ProviderError>>, ProviderError>,
+    /// 收到的转发请求（forward 与 forward_stream 共用，按调用顺序追加）。
+    pub received: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+impl MockForwardAdaptor {
+    /// 构造：非流式 / 流式脚本各自指定。
+    pub fn new(
+        forward: Result<ProviderResponse, ProviderError>,
+        stream: Result<Vec<Result<StreamEvent, ProviderError>>, ProviderError>,
+    ) -> Self {
+        Self {
+            forward,
+            stream,
+            received: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 用共享 recorder 构造（测试侧可事后断言请求体）。
+    pub fn with_recorder(
+        received: Arc<Mutex<Vec<ChatRequest>>>,
+        forward: Result<ProviderResponse, ProviderError>,
+        stream: Result<Vec<Result<StreamEvent, ProviderError>>, ProviderError>,
+    ) -> Self {
+        Self {
+            forward,
+            stream,
+            received,
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderAdaptor for MockForwardAdaptor {
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::OpenAi
+    }
+
+    fn default_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn default_base_url(&self) -> Option<&'static str> {
+        None
+    }
+
+    async fn test(&self, _channel: &Channel) -> Result<TestResult, ProviderError> {
+        Ok(TestResult {
+            ok: true,
+            latency_ms: 0,
+            error: None,
+        })
+    }
+
+    async fn forward(
+        &self,
+        _channel: &Channel,
+        request: &ChatRequest,
+    ) -> Result<ProviderResponse, ProviderError> {
+        self.received.lock().unwrap().push(request.clone());
+        self.forward.clone()
+    }
+
+    async fn forward_stream(
+        &self,
+        _channel: &Channel,
+        request: &ChatRequest,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        self.received.lock().unwrap().push(request.clone());
+        match &self.stream {
+            Err(e) => Err(e.clone()),
+            Ok(events) => Ok(Box::pin(futures_util::stream::iter(events.clone()))),
+        }
     }
 }
 
