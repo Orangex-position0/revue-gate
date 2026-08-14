@@ -1,13 +1,13 @@
 //! 数据面：HTTP 服务生命周期管理（启动/停止 + 优雅停机）。
 //!
-//! `ServerManager` 与 Tauri 解耦：命令层负责调用并把状态变化广播为事件（见 commands）。
+//! `ServerManager` 与 Tauri / 路由解耦：路由树由调用方构建后传入（数据面装配在 lib.rs /
+//! 命令层），服务层只负责监听、serve 与优雅停机。
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use axum::Router;
 use tokio::sync::oneshot;
-
-use super::router::build_router;
 
 /// 服务生命周期错误。
 #[derive(Debug, thiserror::Error)]
@@ -39,11 +39,16 @@ impl ServerManager {
         Self::default()
     }
 
-    /// 在 `host:port` 上启动服务，返回实际监听地址（port 0 = 随机端口）。
+    /// 在 `host:port` 上启动 `router`，返回实际监听地址（port 0 = 随机端口）。
     ///
     /// 先异步绑定监听器（持锁期间无 await，遵守 tokio 协作式调度约束），
     /// 再进入短临界区登记运行句柄；已运行时返回 `AlreadyRunning`。
-    pub async fn start(&self, host: &str, port: u16) -> Result<SocketAddr, ServerError> {
+    pub async fn start(
+        &self,
+        host: &str,
+        port: u16,
+        router: Router,
+    ) -> Result<SocketAddr, ServerError> {
         let listener = tokio::net::TcpListener::bind((host, port))
             .await
             .map_err(ServerError::Bind)?;
@@ -58,7 +63,7 @@ impl ServerManager {
         // 也让 serve 自退出后能再次 start。
         let inner = Arc::clone(&self.inner);
         let task = tokio::spawn(async move {
-            let result = axum::serve(listener, build_router())
+            let result = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -115,7 +120,10 @@ mod tests {
     #[tokio::test]
     async fn server_starts_accepts_connections_then_stop_closes_port() {
         let manager = ServerManager::new();
-        let addr = manager.start("127.0.0.1", 0).await.expect("start");
+        let addr = manager
+            .start("127.0.0.1", 0, Router::new())
+            .await
+            .expect("start");
 
         // 启动后应能建立 TCP 连接（listener 已绑定）
         let _stream = tokio::net::TcpStream::connect(addr)
@@ -150,9 +158,12 @@ mod tests {
     #[tokio::test]
     async fn double_start_errors() {
         let manager = ServerManager::new();
-        let _first = manager.start("127.0.0.1", 0).await.expect("first start");
+        let _first = manager
+            .start("127.0.0.1", 0, Router::new())
+            .await
+            .expect("first start");
         let err = manager
-            .start("127.0.0.1", 0)
+            .start("127.0.0.1", 0, Router::new())
             .await
             .expect_err("second start should error");
         assert!(matches!(err, ServerError::AlreadyRunning));
@@ -163,11 +174,17 @@ mod tests {
     #[tokio::test]
     async fn restart_after_stop() {
         let manager = ServerManager::new();
-        let first = manager.start("127.0.0.1", 0).await.expect("first start");
+        let first = manager
+            .start("127.0.0.1", 0, Router::new())
+            .await
+            .expect("first start");
         manager.stop().await.expect("stop");
         assert!(!manager.is_running());
 
-        let second = manager.start("127.0.0.1", 0).await.expect("restart");
+        let second = manager
+            .start("127.0.0.1", 0, Router::new())
+            .await
+            .expect("restart");
         assert_ne!(first, second, "restart should bind a new addr");
         manager.stop().await.expect("cleanup stop");
     }

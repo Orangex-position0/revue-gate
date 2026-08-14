@@ -3,6 +3,7 @@
 
 pub mod api_key;
 pub mod channel;
+pub mod request_log;
 
 use std::str::FromStr;
 

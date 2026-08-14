@@ -7,8 +7,12 @@ pub mod interface;
 mod test_support;
 pub mod usecases;
 
+use std::sync::Arc;
+
+use infrastructure::providers::adaptor_for;
 use infrastructure::sqlite::api_key::SqliteApiKeyRepository;
 use infrastructure::sqlite::channel::SqliteChannelRepository;
+use infrastructure::sqlite::request_log::SqliteRequestLogRepository;
 use interface::commands::api_key::{
     create_api_key, delete_api_key, list_api_keys, set_api_key_enabled, update_api_key,
 };
@@ -19,8 +23,15 @@ use interface::commands::channel::{
 use interface::commands::server::{
     DEFAULT_HOST, DEFAULT_PORT, ServerStatus, get_server_status, start_server, stop_server,
 };
+use interface::http::handlers::AppState;
+use interface::http::router::build_router;
 use interface::http::server::ServerManager;
 use tauri::{Emitter, Manager};
+
+use crate::domain::api_key::ApiKeyRepository;
+use crate::domain::channel::{Channel, ChannelRepository};
+use crate::domain::request_log::RequestLogRepository;
+use crate::usecases::proxy::ProxyRequestUsecase;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -29,6 +40,11 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 已存在 subscriber（如调试器/宿主注入）时不重复初始化：try_init 而非 init，避免 panic。
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -61,7 +77,26 @@ pub fn run() {
 
             // 1b) 渠道/密钥仓储入 state（命令层经 tauri::State 访问）。
             app.manage(SqliteChannelRepository::new(pool.clone()));
-            app.manage(SqliteApiKeyRepository::new(pool));
+            app.manage(SqliteApiKeyRepository::new(pool.clone()));
+
+            // 1c) 数据面 AppState：共享同一连接池的 Arc 仓储 + 转发用例。
+            //     与命令层仓储是不同实例，但共用 pool → 数据一致；接口也便于 mock（seam A）。
+            let channel_repo: Arc<dyn ChannelRepository> =
+                Arc::new(SqliteChannelRepository::new(pool.clone()));
+            let api_key_repo: Arc<dyn ApiKeyRepository> =
+                Arc::new(SqliteApiKeyRepository::new(pool.clone()));
+            let log_repo: Arc<dyn RequestLogRepository> =
+                Arc::new(SqliteRequestLogRepository::new(pool.clone()));
+            let proxy = Arc::new(ProxyRequestUsecase::new(
+                api_key_repo,
+                Arc::clone(&channel_repo),
+                log_repo,
+                Box::new(|channel: &Channel| adaptor_for(channel.channel_type)),
+            ));
+            app.manage(AppState {
+                proxy,
+                channel_repo,
+            });
 
             // 2) 服务管理器入 state（命令层经 tauri::State 访问）。
             let server = ServerManager::new();
@@ -69,10 +104,12 @@ pub fn run() {
 
             // 3) 自动启动 HTTP 服务并广播 server-started（事件是唯一权威源）。
             //    端口被占用等启动失败不致命：记录日志，用户可经控制面改端口后重试。
-            match tauri::async_runtime::block_on(
-                app.state::<ServerManager>()
-                    .start(DEFAULT_HOST, DEFAULT_PORT),
-            ) {
+            let router = build_router(app.state::<AppState>().inner().clone());
+            match tauri::async_runtime::block_on(app.state::<ServerManager>().start(
+                DEFAULT_HOST,
+                DEFAULT_PORT,
+                router,
+            )) {
                 Ok(addr) => {
                     app.emit("server-started", ServerStatus::from_addr(addr))?;
                 }

@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
@@ -102,6 +103,28 @@ pub(crate) fn sample_api_key() -> ApiKey {
         },
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+    }
+}
+
+/// 构造一条最小 RequestLog 测试样本（供各层测试复用，字段多为可选空值）。
+pub(crate) fn sample_request_log() -> RequestLog {
+    RequestLog {
+        id: Uuid::now_v7(),
+        api_key_id: None,
+        channel_id: None,
+        model: "gpt-4o".to_string(),
+        upstream_model: None,
+        status_code: 200,
+        prompt_tokens: None,
+        completion_tokens: None,
+        total_tokens: None,
+        duration_ms: 42,
+        error_message: None,
+        is_stream: false,
+        is_retry: false,
+        trace_id: Uuid::now_v7().to_string(),
+        request_body: None,
+        created_at: Utc::now(),
     }
 }
 

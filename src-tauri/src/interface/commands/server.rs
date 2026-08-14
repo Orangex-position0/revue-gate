@@ -4,8 +4,10 @@
 //! `server-started` / `server-stopped` 事件广播给前端。事件是运行状态的唯一权威源。
 
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
+use crate::interface::http::handlers::AppState;
+use crate::interface::http::router::build_router;
 use crate::interface::http::server::ServerManager;
 
 /// 数据面 HTTP 服务默认启动参数（设置中心落地前先固定默认值）。
@@ -52,6 +54,7 @@ pub fn get_server_status(server: tauri::State<'_, ServerManager>) -> ServerStatu
 
 /// 启动 HTTP 服务。host/port 缺省时使用默认值（127.0.0.1:3000）。
 /// 启动成功后先广播 `server-started`（携带实际监听地址），再返回同一状态。
+/// 路由树在启动时从数据面 AppState（managed state）现构建，保证每次启动用最新仓储装配。
 #[tauri::command]
 pub async fn start_server(
     app: tauri::AppHandle,
@@ -61,7 +64,11 @@ pub async fn start_server(
 ) -> Result<ServerStatus, String> {
     let host = host.as_deref().unwrap_or(DEFAULT_HOST);
     let port = port.unwrap_or(DEFAULT_PORT);
-    let addr = server.start(host, port).await.map_err(|e| e.to_string())?;
+    let router = build_router(app.state::<AppState>().inner().clone());
+    let addr = server
+        .start(host, port, router)
+        .await
+        .map_err(|e| e.to_string())?;
     let status = ServerStatus::from_addr(addr);
     if let Err(err) = app.emit("server-started", status.clone()) {
         // 广播失败即回滚：事件是状态同步的唯一通道，不允许“服务已启动但无人知晓”。
