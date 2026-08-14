@@ -9,3 +9,4 @@ pub mod channel;
 pub mod log;
 pub mod models;
 pub mod proxy;
+pub mod stats;

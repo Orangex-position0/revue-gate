@@ -16,7 +16,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
     TestResult,
 };
-use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
+use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
 
 /// 构造一条最小 Channel 测试样本（供各层测试复用）。
 pub(crate) fn sample_channel() -> Channel {
@@ -252,6 +252,28 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
         let n = guard.len() as u64;
         guard.clear();
         Ok(n)
+    }
+
+    /// 统计投影：复用左闭右开区间语义（与 sqlx 实现一致），返回轻量行（不含请求体）。
+    async fn stat_rows(
+        &self,
+        start_at: Option<DateTime<Utc>>,
+        end_at: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LogStatRow>, RepositoryError> {
+        let logs = self.logs.read().unwrap();
+        Ok(logs
+            .iter()
+            .filter(|l| {
+                start_at.is_none_or(|s| l.created_at >= s)
+                    && end_at.is_none_or(|e| l.created_at < e)
+            })
+            .map(|l| LogStatRow {
+                status_code: l.status_code,
+                total_tokens: l.total_tokens,
+                duration_ms: l.duration_ms,
+                created_at: l.created_at,
+            })
+            .collect())
     }
 }
 

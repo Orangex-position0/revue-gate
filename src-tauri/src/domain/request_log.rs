@@ -132,6 +132,20 @@ pub struct LogPage {
     pub total: u64,
 }
 
+/// 统计投影行：仪表盘聚合所需的轻量列（不含 request_body，避免统计扫描拖回大字段）。
+/// `stat_rows` 返回此类型，聚合逻辑在 usecases/stats.rs（纯 Rust，单一代码路径，
+/// sqlx 与 InMemory 实现数据一致，见 Spec §Testing seam A）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogStatRow {
+    /// 网关返回给客户端的 HTTP 状态码（<400 视为成功，用于渠道可用率）。
+    pub status_code: u16,
+    /// 本次请求总 token（流式解析后回填；未解析到则为 None，按 0 计）。
+    pub total_tokens: Option<u32>,
+    /// 请求总耗时（毫秒）。
+    pub duration_ms: u64,
+    pub created_at: DateTime<Utc>,
+}
+
 /// RequestLog 仓储 trait：领域层定义接口，infrastructure 提供 sqlx 实现。
 #[async_trait::async_trait]
 pub trait RequestLogRepository: Send + Sync {
@@ -151,4 +165,11 @@ pub trait RequestLogRepository: Send + Sync {
     async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, RepositoryError>;
     /// 清空全部日志，返回删除条数。
     async fn clear(&self) -> Result<u64, RepositoryError>;
+    /// 统计投影：返回落在左闭右开区间 `[start_at, end_at)` 内的轻量日志行
+    /// （时间维度 None = 不限）。聚合逻辑在 usecases，本方法只做取数与过滤。
+    async fn stat_rows(
+        &self,
+        start_at: Option<DateTime<Utc>>,
+        end_at: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LogStatRow>, RepositoryError>;
 }

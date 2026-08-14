@@ -128,3 +128,28 @@ export interface LogDetail extends RequestLog {
   /** 工具标签：声明 + 调用去重合并。 */
   toolNames: string[];
 }
+
+/** 7 天趋势折线的单个数据点（date 为本地时区日期 YYYY-MM-DD）。 */
+export interface DailyStat {
+  date: string;
+  requests: number;
+  tokens: number;
+}
+
+/** 仪表盘统计快照：卡片指标 + 7 天趋势（与请求日志数据一致）。 */
+export interface StatsSnapshot {
+  /** 今日（本地时区）请求数。 */
+  todayRequests: number;
+  /** 今日（本地时区）总 token。 */
+  todayTokens: number;
+  /** 累计请求数。 */
+  totalRequests: number;
+  /** 累计总 token。 */
+  totalTokens: number;
+  /** 平均延迟（毫秒）：全部请求 duration_ms 的均值；无日志为 0。 */
+  avgLatencyMs: number;
+  /** 渠道可用率（0..=1）：status_code < 400 的请求占比；无日志为 0。 */
+  channelAvailability: number;
+  /** 最近 7 天（含今日，旧→新）按本地日聚合。 */
+  trend: DailyStat[];
+}

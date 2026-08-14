@@ -10,6 +10,7 @@ import type {
   LogPage,
   LogQuery,
   ServerStatus,
+  StatsSnapshot,
 } from "@/types";
 
 /** 统一错误转换：Tauri Command 返回 Result<T, String>，invoke 拒绝值可能是 String / Error。 */
@@ -65,4 +66,11 @@ export const logApi = {
     invoke<number>("delete_logs_before", { before }),
   /** 清空全部请求日志，返回删除条数。 */
   clear: () => invoke<number>("clear_logs"),
+};
+
+export const statsApi = {
+  /** 仪表盘统计快照：卡片指标 + 7 天趋势。
+   *  timezoneOffsetMinutes 为前端本地时区偏移（JS `Date.getTimezoneOffset()`：西为正，东为负）。 */
+  get: (timezoneOffsetMinutes: number) =>
+    invoke<StatsSnapshot>("get_stats", { timezoneOffsetMinutes }),
 };

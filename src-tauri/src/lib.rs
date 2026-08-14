@@ -24,6 +24,7 @@ use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, l
 use interface::commands::server::{
     DEFAULT_HOST, DEFAULT_PORT, ServerStatus, get_server_status, start_server, stop_server,
 };
+use interface::commands::stats::get_stats;
 use interface::http::handlers::AppState;
 use interface::http::router::build_router;
 use interface::http::server::ServerManager;
@@ -67,7 +68,8 @@ pub fn run() {
             list_logs,
             get_log_detail,
             delete_logs_before,
-            clear_logs
+            clear_logs,
+            get_stats
         ])
         .setup(|app| {
             // 1) SQLite 连接池 + 内嵌迁移：失败即启动失败（业务数据层不可用则无意义运行）。

@@ -13,7 +13,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
-use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
+use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
 
 /// 请求日志表行映射：与 `migrations/001_init.sql` 的 request_logs 列一一对应。
 /// INTEGER 列读为 i64，再由 `TryFrom` 转换为领域层的窄类型。
@@ -34,6 +34,15 @@ struct RequestLogDb {
     is_retry: bool,
     trace_id: String,
     request_body: Option<String>,
+    created_at: String,
+}
+
+/// 统计投影表行映射：只含聚合所需列（不含 request_body，见 `LogStatRow`）。
+#[derive(FromRow)]
+struct StatRowDb {
+    status_code: i64,
+    total_tokens: Option<i64>,
+    duration_ms: i64,
     created_at: String,
 }
 
@@ -154,6 +163,39 @@ impl RequestLogRepository for SqliteRequestLogRepository {
             .await
             .map_err(db_err)?;
         Ok(result.rows_affected())
+    }
+
+    /// 统计投影：只取聚合所需列（不含 request_body），左闭右开区间 `[start_at, end_at)`，
+    /// 与 `LogQuery::matches` 的日期语义一致。聚合在 usecases/stats.rs 完成。
+    async fn stat_rows(
+        &self,
+        start_at: Option<DateTime<Utc>>,
+        end_at: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LogStatRow>, RepositoryError> {
+        let mut sql = String::from(
+            "SELECT status_code, total_tokens, duration_ms, created_at FROM request_logs",
+        );
+        let mut binds: Vec<String> = Vec::new();
+        let mut clauses: Vec<&str> = Vec::new();
+        if let Some(start) = start_at {
+            clauses.push("created_at >= ?");
+            binds.push(fmt_time(start));
+        }
+        if let Some(end) = end_at {
+            clauses.push("created_at < ?");
+            binds.push(fmt_time(end));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+
+        let mut q = sqlx::query_as::<_, StatRowDb>(&sql);
+        for b in &binds {
+            q = q.bind(b.as_str());
+        }
+        let rows: Vec<StatRowDb> = q.fetch_all(&self.pool).await.map_err(db_err)?;
+        rows.into_iter().map(LogStatRow::try_from).collect()
     }
 }
 
@@ -278,6 +320,22 @@ where
     T::Error: std::fmt::Debug,
 {
     T::try_from(value).map_err(|_| bad_row(&format!("{column} out of range")))
+}
+
+impl TryFrom<StatRowDb> for LogStatRow {
+    type Error = RepositoryError;
+
+    fn try_from(row: StatRowDb) -> Result<Self, Self::Error> {
+        Ok(LogStatRow {
+            status_code: narrow("status_code", row.status_code)?,
+            total_tokens: row
+                .total_tokens
+                .map(|t| narrow("total_tokens", t))
+                .transpose()?,
+            duration_ms: narrow("duration_ms", row.duration_ms)?,
+            created_at: parse_utc(&row.created_at)?,
+        })
+    }
 }
 
 /// 解析库内 RFC3339 时间字符串为 `DateTime<Utc>`。
@@ -742,5 +800,51 @@ mod tests {
         let n = repo.clear().await.expect("clear");
         assert_eq!(n, 2);
         assert!(all_request_logs(&repo).await.is_empty());
+    }
+
+    /// 统计投影：只含聚合列（无 request_body 字段），按左闭右开区间过滤（下界含、上界不含）。
+    #[tokio::test]
+    async fn stat_rows_projects_within_half_open_range() {
+        let repo = new_repo().await;
+        let mut in_range = log_at("in", utc("2026-01-15T12:00:00Z"));
+        in_range.status_code = 502;
+        in_range.total_tokens = Some(99);
+        in_range.duration_ms = 1234;
+        in_range.request_body = Some("should-not-be-loaded".to_string());
+        repo.save(&in_range).await.expect("save in");
+        repo.save(&log_at("at-start", utc("2026-01-01T00:00:00Z")))
+            .await
+            .expect("save start");
+        repo.save(&log_at("at-end", utc("2026-02-01T00:00:00Z")))
+            .await
+            .expect("save end");
+
+        let rows = repo
+            .stat_rows(
+                Some(utc("2026-01-01T00:00:00Z")),
+                Some(utc("2026-02-01T00:00:00Z")),
+            )
+            .await
+            .expect("stat rows");
+        assert_eq!(rows.len(), 2, "下界含、上界不含");
+        let row = rows.iter().find(|r| r.status_code == 502).expect("in row");
+        assert_eq!(row.total_tokens, Some(99));
+        assert_eq!(row.duration_ms, 1234);
+        assert_eq!(row.created_at, utc("2026-01-15T12:00:00Z"));
+    }
+
+    /// 统计投影：无时间范围时返回全部日志行。
+    #[tokio::test]
+    async fn stat_rows_without_range_returns_all_rows() {
+        let repo = new_repo().await;
+        repo.save(&log_at("a", utc("2026-01-01T00:00:00Z")))
+            .await
+            .expect("save a");
+        repo.save(&log_at("b", utc("2026-01-02T00:00:00Z")))
+            .await
+            .expect("save b");
+
+        let rows = repo.stat_rows(None, None).await.expect("stat rows");
+        assert_eq!(rows.len(), 2);
     }
 }
