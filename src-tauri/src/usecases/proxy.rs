@@ -253,7 +253,7 @@ fn is_retryable(status: u16) -> bool {
     status == 429 || (500..=599).contains(&status)
 }
 
-/// 记账：按 usage 归一后的 total tokens 累加密钥已用额度（无 usage 时不动作）。
+/// 记账：按 usage 归一后的 total tokens 累加密钥已用额度（无 usage 或 total 为 0 时不动作）。
 async fn accumulate_usage(
     api_key_repo: &dyn ApiKeyRepository,
     api_key_id: Uuid,
@@ -263,6 +263,9 @@ async fn accumulate_usage(
         return Ok(());
     };
     let total = usage.normalized().total_tokens.unwrap_or(0);
+    if total == 0 {
+        return Ok(());
+    }
     AccumulateUsageUsecase
         .execute(api_key_repo, api_key_id, total)
         .await
@@ -350,7 +353,8 @@ struct StreamState {
 }
 
 /// 包装上游流：逐帧聚合 usage，流正常结束（None）时记账 + 写成功日志，
-/// 中途出错（Err）时写失败日志后终止。打开流本身失败的重试在 execute 内处理。
+/// 中途出错（Err）时按已聚合的增量 usage 记账 + 写失败日志后终止（US19「每次请求累加密钥配额」）。
+/// 打开流本身失败的重试在 execute 内处理。
 /// ponytail: 客户端中途断开导致流未被拉尽时不报账/写日志；v0.1 接受，升级需取消感知包装。
 fn wrap_stream_bookkeeping(
     inner: BoxStream<'static, Result<StreamEvent, ProviderError>>,
@@ -382,6 +386,16 @@ fn wrap_stream_bookkeeping(
                     Some(Err(err)) => {
                         state.done = true;
                         let proxy_err = ProxyError::Provider(err);
+                        // 已下发的增量 usage 也累加配额（与失败日志记录的 total_tokens 一致；尽力而为）。
+                        if let Err(e) = accumulate_usage(
+                            api_key_repo.as_ref(),
+                            ctx.api_key.id,
+                            Some(state.usage),
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to accumulate quota after stream error");
+                        }
                         let log =
                             build_log(&ctx, 502, Some(state.usage), Some(proxy_err.to_string()));
                         if let Err(e) = log_repo.save(&log).await {
@@ -902,13 +916,14 @@ mod tests {
         assert_eq!(logs[1].status_code, 200);
     }
 
-    /// 流中途出错：写一条失败日志并终止（已发出的帧不受影响）。
+    /// 流中途出错：写一条失败日志（携带已聚合的增量 usage）+ 按增量 usage 记账后终止
+    /// （已发出的帧不受影响；US19 每次请求累加密钥配额，含未收尾的流）。
     #[tokio::test]
-    async fn stream_midway_error_writes_failure_log() {
+    async fn stream_midway_error_writes_failure_log_and_bills_partial_usage() {
         let events = vec![
             Ok(StreamEvent {
-                data: b"data: partial\n\n".to_vec(),
-                usage: None,
+                data: b"data: {\"delta\":\"partial\"}\n\n".to_vec(),
+                usage: Some(usage(3, 2, 5)),
             }),
             Err(ProviderError::Request("connection reset".into())),
         ];
@@ -937,12 +952,23 @@ mod tests {
         let logs = logs.list().await.expect("logs");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status_code, 502);
+        assert_eq!(
+            logs[0].total_tokens,
+            Some(5),
+            "失败日志携带已聚合的增量 usage"
+        );
         assert!(
             logs[0]
                 .error_message
                 .as_deref()
                 .unwrap()
                 .contains("connection reset")
+        );
+
+        let saved = keys.find_by_id(key.id).await.expect("find").expect("found");
+        assert_eq!(
+            saved.quota.used, 5,
+            "流中断时已下发的增量 usage 同样累加配额"
         );
     }
 }

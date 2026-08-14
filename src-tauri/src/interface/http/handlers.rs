@@ -6,18 +6,22 @@
 //! - `TraceIdSpan` / `TraceOnResponse`：TraceLayer 的 span 携带 trace_id，响应后打结构化日志；
 //! - `chat_completions` / `models`：解析请求 → 调转发 / 模型列表用例 → 错误映射为 HTTP 状态码。
 //!
-//! 流式请求（`stream: true`）在 handler 层直接拒绝（阶段 09 落地 SSE），避免误向上游发起请求；
+//! 流式请求（`stream: true`）走 SSE 透传：转发用例返回的事件流逐帧写入响应体
+//! （`text/event-stream`），`[DONE]` 由上游透传或转换适配器合成，收尾即响应体结束；
+//! 记账与日志在用例侧流结束时内联完成。
 //! 上游密钥永不回传：上游错误体由适配器收敛为通用错误体（红线，见 providers.rs）。
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tower_http::trace::{MakeSpan, OnResponse};
 use tracing::Span;
@@ -97,7 +101,8 @@ impl<B> OnResponse<B> for TraceOnResponse {
     }
 }
 
-/// POST /v1/chat/completions：认证 → 转发 → 记账 → 日志（非流式；流式 501 待阶段 09）。
+/// POST /v1/chat/completions：认证 → 转发 → 记账 → 日志。
+/// 非流式原样透传响应体；流式把转发用例的事件流逐帧写入 SSE 响应体（`[DONE]` 收尾）。
 pub(crate) async fn chat_completions(
     State(state): State<AppState>,
     Extension(trace_id): Extension<TraceId>,
@@ -114,12 +119,6 @@ pub(crate) async fn chat_completions(
     if bearer_token.is_none() {
         return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
     }
-    if body.get("stream").and_then(Value::as_bool).unwrap_or(false) {
-        return error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "streaming is not supported yet",
-        );
-    }
     let request = ProxyRequest {
         bearer_token,
         model: body
@@ -127,7 +126,7 @@ pub(crate) async fn chat_completions(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        stream: false,
+        stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
         body,
         trace_id: trace_id.0,
     };
@@ -142,8 +141,25 @@ pub(crate) async fn chat_completions(
             )
                 .into_response()
         }
-        Ok(ProxySuccess::Stream(_)) => {
-            unreachable!("stream requests are rejected before reaching the usecase")
+        Ok(ProxySuccess::Stream(stream)) => {
+            // 逐帧透传上游 SSE 字节，帧到达即写（实时）；`[DONE]` 由上游透传或转换适配器合成，
+            // 流结束即响应体结束。流中错误：用例侧已写失败日志并终止流，此处停止下发，
+            // 客户端见无 `[DONE]` 的截断流（响应头已发出，无法改状态码）。
+            let resp_body = Body::from_stream(stream.filter_map(|event| async move {
+                match event {
+                    Ok(event) => Some(Ok::<_, std::convert::Infallible>(event.data)),
+                    Err(_) => None,
+                }
+            }));
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/event-stream"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                resp_body,
+            )
+                .into_response()
         }
         Err(err) => proxy_error_response(err),
     }
@@ -224,7 +240,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::Router;
-    use axum::body::Body;
+    use axum::body::{Body, Bytes};
     use axum::extract::Json;
     use axum::http::{Request, StatusCode, header};
     use axum::routing::post;
@@ -464,27 +480,210 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// stream=true → 501（阶段 09 落地 SSE；不得误向上游转发）。
+    /// seam B：流式请求（stream=true）→ 真实 reqwest 打 mock 上游，SSE 帧逐帧透传，
+    /// `[DONE]` 收尾正确；流结束后按 usage 记账 + 写成功日志（is_stream=true）。
     #[tokio::test]
-    async fn chat_completions_streaming_returns_501() {
+    async fn chat_completions_streaming_relays_sse_and_done_and_bills() {
         let h = harness().await;
+
+        // mock 上游：返回完整 OpenAI 兼容 SSE 流（增量帧 + usage 末帧 + [DONE] 收尾）。
+        let payload = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",",
+            "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from(payload),
+                )
+            }),
+        );
+        let (base, handle) = test_util::spawn(upstream).await;
+
+        let key = seed_channel_and_key(&h, &base).await;
         let app = app(&h);
 
         let response = app
             .oneshot(post_chat(
-                r#"{"model":"gpt-4o","stream":true,"messages":[]}"#,
-                Some("whatever"),
-                "trace-stream",
+                r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                Some(&key),
+                "trace-stream-1",
             ))
             .await
             .expect("oneshot");
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM request_logs")
-            .fetch_one(&h.pool)
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some("text/event-stream"),
+            "SSE 响应应带 text/event-stream"
+        );
+
+        // 读完响应体后再关 mock 上游，避免截断仍在传输的流。
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
-            .expect("count logs");
-        assert_eq!(count, 0, "被拒请求不产生日志");
+            .expect("read body");
+        handle.abort();
+        let text = String::from_utf8_lossy(&body);
+        assert_eq!(text, payload, "SSE 帧原样透传，不改写增量内容");
+        assert!(
+            text.ends_with("data: [DONE]\n\n"),
+            "[DONE] 收尾正确；实际：{text}"
+        );
+
+        // 流结束：usage 记账 + 写成功日志（is_stream=true，total_tokens 取聚合 usage）。
+        let row =
+            sqlx::query("SELECT trace_id, status_code, is_stream, total_tokens FROM request_logs")
+                .fetch_one(&h.pool)
+                .await
+                .expect("request_log row");
+        assert_eq!(row.get::<String, _>(0), "trace-stream-1");
+        assert_eq!(row.get::<i64, _>(1), 200);
+        assert_eq!(row.get::<i64, _>(2), 1, "is_stream 应标记为真");
+        assert_eq!(row.get::<i64, _>(3), 5);
+
+        let saved = h
+            .api_key_repo
+            .find_by_key(&key)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(saved.quota.used, 5, "流式 usage 累加配额");
+    }
+
+    /// seam B：流中途上游连接中断（无 `[DONE]`）→ 客户端见已下发帧原样透传后的截断流
+    /// （响应头已发出，状态码保持 200）；用例侧写 502 失败日志并已按增量 usage 记账。
+    /// 流式中断与收尾只有该 seam 能可靠覆盖（Spec §Testing Decisions）。
+    #[tokio::test]
+    async fn chat_completions_streaming_interruption_truncates_and_bills_partial_usage() {
+        let h = harness().await;
+
+        // mock 上游：发出增量帧 + usage 帧后，流中途注入错误（连接中断，无 [DONE]）。
+        // 每帧后短暂 sleep：确保网关已收到响应头成功打开发流、且帧已被可靠读取后再断连
+        // （RST 会丢弃仍在途的字节，故 error 必须滞后于末帧送达）。
+        let frame_delta = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+        let frame_usage = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n";
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    Body::from_stream(futures_util::stream::unfold(0u8, move |step| async move {
+                        match step {
+                            0 => Some((
+                                Ok::<_, std::io::Error>(Bytes::from_static(frame_delta.as_bytes())),
+                                1,
+                            )),
+                            1 => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                Some((
+                                    Ok::<_, std::io::Error>(Bytes::from_static(
+                                        frame_usage.as_bytes(),
+                                    )),
+                                    2,
+                                ))
+                            }
+                            2 => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                Some((
+                                    Err::<_, std::io::Error>(std::io::Error::other(
+                                        "upstream connection reset",
+                                    )),
+                                    3,
+                                ))
+                            }
+                            _ => None,
+                        }
+                    })),
+                )
+            }),
+        );
+        let (base, handle) = test_util::spawn(upstream).await;
+
+        let key = seed_channel_and_key(&h, &base).await;
+        let app = app(&h);
+
+        let response = app
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+                Some(&key),
+                "trace-stream-err",
+            ))
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "响应头已发出，流中断无法改为 502"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some("text/event-stream"),
+            "SSE 响应应带 text/event-stream"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        handle.abort();
+        let text = String::from_utf8_lossy(&body);
+        assert_eq!(
+            text,
+            format!("{frame_delta}{frame_usage}"),
+            "已下发的帧原样透传后截断；实际：{text}"
+        );
+        assert!(
+            !text.contains("[DONE]"),
+            "流中断：客户端不应看到 [DONE] 收尾；实际：{text}"
+        );
+
+        // 用例侧：502 失败日志（携带增量 usage）+ 按增量 usage 记账。
+        let row = sqlx::query(
+            "SELECT trace_id, status_code, is_stream, total_tokens, error_message FROM request_logs",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("request_log row");
+        assert_eq!(row.get::<String, _>(0), "trace-stream-err");
+        assert_eq!(
+            row.get::<i64, _>(1),
+            502,
+            "流中断写失败日志（与线上 200 分离）"
+        );
+        assert_eq!(row.get::<i64, _>(2), 1, "is_stream 应标记为真");
+        assert_eq!(row.get::<i64, _>(3), 5, "失败日志携带已聚合的增量 usage");
+        assert!(
+            row.get::<Option<String>, _>(4).is_some(),
+            "流中断应记录失败原因"
+        );
+
+        let saved = h
+            .api_key_repo
+            .find_by_key(&key)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(
+            saved.quota.used, 5,
+            "流中断时已下发的增量 usage 同样累加配额"
+        );
     }
 
     /// stream=true 且无 Bearer → 401：认证优先于功能门（需求“无 Bearer 返回 401”无流式豁免）。
