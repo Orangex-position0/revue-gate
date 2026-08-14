@@ -6,6 +6,9 @@ import type {
   Channel,
   ChannelInput,
   ChannelTestResult,
+  LogDetail,
+  LogPage,
+  LogQuery,
   ServerStatus,
 } from "@/types";
 
@@ -49,4 +52,17 @@ export const apiKeyApi = {
   /** 启停密钥并返回（状态正确持久化）。 */
   setEnabled: (id: string, enabled: boolean) =>
     invoke<ApiKey>("set_api_key_enabled", { id, enabled }),
+};
+
+export const logApi = {
+  /** 分页查询日志：多条件筛选（keyword / 密钥 / 渠道 / 模型 / 日期范围），按创建时间倒序。 */
+  list: (query: LogQuery, page: number, pageSize: number) =>
+    invoke<LogPage>("list_logs", { query, page, pageSize }),
+  /** 日志详情：请求日志 + 从请求体解析出的对话 / 参数 / 工具标签。 */
+  detail: (id: string) => invoke<LogDetail>("get_log_detail", { id }),
+  /** 删除创建时间严格早于 before（ISO-8601）的日志，返回删除条数。 */
+  deleteBefore: (before: string) =>
+    invoke<number>("delete_logs_before", { before }),
+  /** 清空全部请求日志，返回删除条数。 */
+  clear: () => invoke<number>("clear_logs"),
 };

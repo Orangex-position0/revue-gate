@@ -6,5 +6,6 @@
 pub mod api_key;
 pub mod auth;
 pub mod channel;
+pub mod log;
 pub mod models;
 pub mod proxy;

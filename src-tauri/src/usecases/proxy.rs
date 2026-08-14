@@ -433,7 +433,7 @@ mod tests {
     use crate::domain::provider::Usage;
     use crate::test_support::{
         InMemoryApiKeyRepository, InMemoryChannelRepository, InMemoryRequestLogRepository,
-        MockForwardAdaptor, sample_api_key, sample_channel,
+        MockForwardAdaptor, all_request_logs, sample_api_key, sample_channel,
     };
     use std::sync::Mutex;
 
@@ -532,7 +532,7 @@ mod tests {
         assert_eq!(resp.status_code, 200);
         assert_eq!(resp.usage, Some(usage(10, 5, 15)));
 
-        let logs = logs.list().await.expect("list logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 1);
         let log = &logs[0];
         assert_eq!(log.api_key_id, Some(key.id));
@@ -598,7 +598,7 @@ mod tests {
             .expect_err("no bearer");
         assert!(matches!(err, ProxyError::Unauthorized));
         assert!(
-            logs.list().await.expect("logs").is_empty(),
+            all_request_logs(&*logs).await.is_empty(),
             "认证失败不写日志"
         );
     }
@@ -619,7 +619,7 @@ mod tests {
             .await
             .expect_err("quota");
         assert!(matches!(err, ProxyError::QuotaExceeded));
-        assert!(logs.list().await.expect("logs").is_empty());
+        assert!(all_request_logs(&*logs).await.is_empty());
     }
 
     /// 空模型名 → InvalidRequest，不查库不写日志。
@@ -633,7 +633,7 @@ mod tests {
             .await
             .expect_err("empty model");
         assert!(matches!(err, ProxyError::InvalidRequest(_)));
-        assert!(logs.list().await.expect("logs").is_empty());
+        assert!(all_request_logs(&*logs).await.is_empty());
     }
 
     /// 模型不被任何启用渠道支持 → NoCandidateChannel，不转发不写日志。
@@ -648,7 +648,7 @@ mod tests {
             .await
             .expect_err("no candidate");
         assert!(matches!(err, ProxyError::NoCandidateChannel(_)));
-        assert!(logs.list().await.expect("logs").is_empty());
+        assert!(all_request_logs(&*logs).await.is_empty());
     }
 
     /// 禁用渠道不参与候选：适配器不会对禁用渠道被调用。
@@ -666,7 +666,7 @@ mod tests {
             .await
             .expect("success");
         assert!(matches!(result, ProxySuccess::NonStream(_)));
-        assert_eq!(logs.list().await.expect("logs").len(), 1);
+        assert_eq!(all_request_logs(&*logs).await.len(), 1);
     }
 
     /// 5xx 可重试：候选 a 失败记一条失败日志，候选 b 成功记一条成功日志，is_retry=true，配额只算成功。
@@ -700,15 +700,22 @@ mod tests {
             .expect("retry success");
         assert!(matches!(result, ProxySuccess::NonStream(_)));
 
-        let logs = logs.list().await.expect("logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 2, "每次失败/成功各一条日志");
-        assert_eq!(logs[0].status_code, 500);
-        assert_eq!(logs[0].channel_id, Some(a.id), "失败日志归属候选 a");
-        assert!(logs[0].error_message.as_deref().unwrap().contains("500"));
-        assert!(!logs[0].is_retry);
-        assert_eq!(logs[1].status_code, 200);
-        assert!(logs[1].is_retry, "第二次尝试标记为重试");
-        assert_eq!(logs[1].total_tokens, Some(15));
+        let fail = logs
+            .iter()
+            .find(|l| l.status_code != 200)
+            .expect("失败日志");
+        assert_eq!(fail.status_code, 500);
+        assert_eq!(fail.channel_id, Some(a.id), "失败日志归属候选 a");
+        assert!(fail.error_message.as_deref().unwrap().contains("500"));
+        assert!(!fail.is_retry);
+        let ok = logs
+            .iter()
+            .find(|l| l.status_code == 200)
+            .expect("成功日志");
+        assert!(ok.is_retry, "第二次尝试标记为重试");
+        assert_eq!(ok.total_tokens, Some(15));
 
         let saved = keys.find_by_id(key.id).await.expect("find").expect("found");
         assert_eq!(saved.quota.used, 15, "失败尝试不计配额，只累加成功 usage");
@@ -739,12 +746,14 @@ mod tests {
             .await
             .expect("retry success");
 
-        let logs = logs.list().await.expect("logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].status_code, 502, "传输错误无状态码记 502");
+        let fail = logs
+            .iter()
+            .find(|l| l.status_code == 502)
+            .expect("失败日志");
         assert!(
-            logs[0]
-                .error_message
+            fail.error_message
                 .as_deref()
                 .unwrap()
                 .contains("connection refused")
@@ -780,7 +789,7 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
-        assert_eq!(logs.list().await.expect("logs").len(), 2);
+        assert_eq!(all_request_logs(&*logs).await.len(), 2);
     }
 
     /// 4xx 客户端错误不重试：候选 a 返回 400 原样透传给客户端，只记一条日志。
@@ -809,7 +818,7 @@ mod tests {
             panic!("expected non-stream");
         };
         assert_eq!(resp.status_code, 400, "4xx 原样透传，不换候选");
-        assert_eq!(logs.list().await.expect("logs").len(), 1, "未发生重试");
+        assert_eq!(all_request_logs(&*logs).await.len(), 1, "未发生重试");
     }
 
     // ---- 流式 ----
@@ -852,7 +861,7 @@ mod tests {
             b"data: {\"delta\":\"hi\"}\n\n"
         );
 
-        let logs = logs.list().await.expect("logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 1);
         let log = &logs[0];
         assert!(log.is_stream);
@@ -901,19 +910,24 @@ mod tests {
         let collected: Vec<_> = stream.collect::<Vec<_>>().await;
         assert_eq!(collected.len(), 1);
 
-        let logs = logs.list().await.expect("logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].status_code, 502, "打开流失败记失败日志");
+        let fail = logs
+            .iter()
+            .find(|l| l.status_code == 502)
+            .expect("失败日志");
         assert!(
-            logs[0]
-                .error_message
+            fail.error_message
                 .as_deref()
                 .unwrap()
                 .contains("stream open failed")
         );
-        assert!(!logs[0].is_retry);
-        assert!(logs[1].is_retry);
-        assert_eq!(logs[1].status_code, 200);
+        assert!(!fail.is_retry);
+        let ok = logs
+            .iter()
+            .find(|l| l.status_code == 200)
+            .expect("成功日志");
+        assert!(ok.is_retry);
     }
 
     /// 流中途出错：写一条失败日志（携带已聚合的增量 usage）+ 按增量 usage 记账后终止
@@ -949,7 +963,7 @@ mod tests {
         assert!(collected[0].is_ok());
         assert!(matches!(collected[1], Err(ProxyError::Provider(_))));
 
-        let logs = logs.list().await.expect("logs");
+        let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].status_code, 502);
         assert_eq!(

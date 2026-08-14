@@ -69,3 +69,62 @@ export interface ApiKey {
   createdAt: string;
   updatedAt: string;
 }
+
+/** 日志查询筛选条件：全部可选，null = 不筛该维度。与后端 LogQuery（Option + serde default）对齐。 */
+export interface LogQuery {
+  /** 关键词：对模型 / 上游模型 / trace / 错误做大小写不敏感子串匹配。 */
+  keyword?: string | null;
+  /** 按发起密钥筛选（api_key_id 精确匹配）。 */
+  apiKeyId?: string | null;
+  /** 按渠道筛选（channel_id 精确匹配）。 */
+  channelId?: string | null;
+  /** 按请求模型名筛选（大小写不敏感子串匹配）。 */
+  model?: string | null;
+  /** 日期下界（左闭）：created_at >= startAt。 */
+  startAt?: string | null;
+  /** 日期上界（右开）：created_at < endAt。 */
+  endAt?: string | null;
+}
+
+/** 请求日志实体：一次请求的完整审计记录（与后端 RequestLog 对齐）。 */
+export interface RequestLog {
+  id: string;
+  apiKeyId: string | null;
+  channelId: string | null;
+  model: string;
+  upstreamModel: string | null;
+  statusCode: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  durationMs: number;
+  errorMessage: string | null;
+  isStream: boolean;
+  isRetry: boolean;
+  traceId: string;
+  requestBody: string | null;
+  createdAt: string;
+}
+
+/** 分页查询结果：当前页日志 + 满足筛选的总条数（供计算总页数）。 */
+export interface LogPage {
+  items: RequestLog[];
+  total: number;
+}
+
+/** 一条对话消息（日志详情展示；content 为文本或 null）。 */
+export interface ConversationMessage {
+  role: string;
+  content: string | null;
+  /** 该消息触发的工具调用名。 */
+  toolNames: string[];
+}
+
+/** 日志详情：日志（扁平字段）+ 从请求体解析出的对话 / 参数 / 工具标签。 */
+export interface LogDetail extends RequestLog {
+  conversation: ConversationMessage[];
+  /** 请求参数：request_body 顶层除 messages / tools / stream 之外的字段。 */
+  requestParams: unknown;
+  /** 工具标签：声明 + 调用去重合并。 */
+  toolNames: string[];
+}

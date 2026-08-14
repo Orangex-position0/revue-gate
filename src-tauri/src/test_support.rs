@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
@@ -16,7 +16,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
     TestResult,
 };
-use crate::domain::request_log::{RequestLog, RequestLogRepository};
+use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
 
 /// 构造一条最小 Channel 测试样本（供各层测试复用）。
 pub(crate) fn sample_channel() -> Channel {
@@ -216,9 +216,52 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
             .cloned())
     }
 
-    async fn list(&self) -> Result<Vec<RequestLog>, RepositoryError> {
-        Ok(self.logs.read().unwrap().clone())
+    /// 分页查询：复用 `LogQuery::matches`（领域层权威筛选语义），与 SQL 实现行为一致。
+    /// 排序与 SQL 侧对齐：created_at 倒序、同时间 id 倒序兜底。
+    async fn query(
+        &self,
+        query: &LogQuery,
+        page: u64,
+        page_size: u64,
+    ) -> Result<LogPage, RepositoryError> {
+        let logs = self.logs.read().unwrap();
+        let mut matched: Vec<&RequestLog> = logs.iter().filter(|l| query.matches(l)).collect();
+        matched.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        let total = matched.len() as u64;
+        let start = ((page.saturating_sub(1)) as usize).min(matched.len());
+        let end = (start.saturating_add(page_size as usize)).min(matched.len());
+        let items = matched[start..end].iter().map(|l| (*l).clone()).collect();
+        Ok(LogPage { items, total })
     }
+
+    /// 删除创建时间严格早于 `before` 的日志（保留 `>= before`）。
+    async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, RepositoryError> {
+        let mut guard = self.logs.write().unwrap();
+        let before_len = guard.len();
+        guard.retain(|l| l.created_at >= before);
+        Ok((before_len - guard.len()) as u64)
+    }
+
+    /// 清空全部日志。
+    async fn clear(&self) -> Result<u64, RepositoryError> {
+        let mut guard = self.logs.write().unwrap();
+        let n = guard.len() as u64;
+        guard.clear();
+        Ok(n)
+    }
+}
+
+/// 取仓储当前全部日志：`RequestLogRepository::list()` 已移除（无界读取），
+/// 测试需要全量断言时改经 `query` 全量分页（LIMIT 拉满，语义等价）。
+pub(crate) async fn all_request_logs(repo: &dyn RequestLogRepository) -> Vec<RequestLog> {
+    repo.query(&LogQuery::default(), 1, u64::MAX)
+        .await
+        .expect("query logs")
+        .items
 }
 
 /// 内存版 ProviderAdaptor：`test()` 返回预设结果（成功 / 失败 / 配置错误），供 test_channel 用例测试。
@@ -457,6 +500,6 @@ mod tests {
             repo.find_by_id(log.id).await.expect("find_by_id"),
             Some(log)
         );
-        assert_eq!(repo.list().await.expect("list").len(), 1);
+        assert_eq!(all_request_logs(&*repo).await.len(), 1);
     }
 }

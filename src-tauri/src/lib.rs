@@ -20,6 +20,7 @@ use interface::commands::channel::{
     create_channel, delete_channel, list_channels, set_channel_enabled, test_channel,
     update_channel,
 };
+use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, list_logs};
 use interface::commands::server::{
     DEFAULT_HOST, DEFAULT_PORT, ServerStatus, get_server_status, start_server, stop_server,
 };
@@ -62,7 +63,11 @@ pub fn run() {
             create_api_key,
             update_api_key,
             delete_api_key,
-            set_api_key_enabled
+            set_api_key_enabled,
+            list_logs,
+            get_log_detail,
+            delete_logs_before,
+            clear_logs
         ])
         .setup(|app| {
             // 1) SQLite 连接池 + 内嵌迁移：失败即启动失败（业务数据层不可用则无意义运行）。
@@ -78,6 +83,7 @@ pub fn run() {
             // 1b) 渠道/密钥仓储入 state（命令层经 tauri::State 访问）。
             app.manage(SqliteChannelRepository::new(pool.clone()));
             app.manage(SqliteApiKeyRepository::new(pool.clone()));
+            app.manage(SqliteRequestLogRepository::new(pool.clone()));
 
             // 1c) 数据面 AppState：共享同一连接池的 Arc 仓储 + 转发用例。
             //     与命令层仓储是不同实例，但共用 pool → 数据一致；接口也便于 mock（seam A）。
