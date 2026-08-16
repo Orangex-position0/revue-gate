@@ -105,6 +105,7 @@ pub enum ProviderError {
 /// Provider adapter trait: isolates protocol differences; the core proxy depends only on this trait (see docs/Architecture-backend.md).
 #[async_trait::async_trait]
 pub trait ProviderAdaptor: Send + Sync {
+    /// Channel type this adapter handles (used for routing / adapter selection).
     fn channel_type(&self) -> ChannelType;
     /// Default model list when creating a channel (for frontend form prefill).
     fn default_models(&self) -> Vec<String>;
