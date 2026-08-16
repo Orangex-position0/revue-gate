@@ -190,6 +190,11 @@ fn normalize(input: ChannelInput) -> Result<ChannelInput, ChannelError> {
     if name.is_empty() {
         return Err(ChannelError::Validation("name must not be empty".into()));
     }
+    if input.weight < 0 {
+        return Err(ChannelError::Validation(
+            "weight must not be negative".into(),
+        ));
+    }
     Ok(ChannelInput {
         name: name.to_string(),
         base_url: non_blank(input.base_url),
@@ -296,6 +301,32 @@ mod tests {
             .expect_err("blank name should be rejected");
         assert!(matches!(err, ChannelError::Validation(_)));
         assert!(repo.list().await.expect("list").is_empty());
+    }
+
+    /// Create / update: a negative weight is rejected (dispatch semantics are undefined for negative weights).
+    #[tokio::test]
+    async fn create_and_update_reject_negative_weight() {
+        let repo = InMemoryChannelRepository::new();
+        let created = CreateChannelUsecase
+            .execute(&repo, input("openai-prod"))
+            .await
+            .expect("create");
+
+        let mut neg = input("bad-weight");
+        neg.weight = -1;
+        assert!(matches!(
+            CreateChannelUsecase.execute(&repo, neg).await,
+            Err(ChannelError::Validation(_))
+        ));
+
+        let mut update = input("bad-weight");
+        update.weight = -1;
+        assert!(matches!(
+            UpdateChannelUsecase
+                .execute(&repo, created.id, update)
+                .await,
+            Err(ChannelError::Validation(_))
+        ));
     }
 
     /// Update: fields are merged, leaving api_key blank keeps the original key, upsert produces no new row.

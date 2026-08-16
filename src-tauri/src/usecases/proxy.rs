@@ -3,7 +3,7 @@
 //! `ProxyRequestUsecase` does not touch real HTTP: the three repositories are injected as `Arc<dyn Trait>`, and the adaptor is injected via a resolver closure
 //! (seam A can be fully mocked, see Spec §Testing). Flow:
 //! 1. Authenticate (reuses AuthenticateRequestUsecase, 401 / 429);
-//! 2. `ChannelSelector` picks candidate channels (enabled → model match → priority ascending);
+//! 2. `ChannelSelector` picks candidate channels (enabled → model match → priority group → weighted random within group);
 //! 3. Apply the model mapping to rewrite `body["model"]`, try candidates one by one:
 //!    - Non-stream success (non-retryable status code) → bill + write a success log, then return;
 //!    - Failure (transport error / 429 / 5xx) → write one failure log, then try the next candidate, never exceeding the candidate count;
@@ -152,8 +152,9 @@ impl ProxyRequestUsecase {
             .execute(self.api_key_repo.as_ref(), request.bearer_token.as_deref())
             .await?;
 
-        // 2) Select candidate channels: enabled → model match → priority ascending.
-        let candidates = ChannelSelector::select(&self.channel_repo.list().await?, model);
+        // 2) Select candidate channels: enabled → model match → priority group → weighted random within group.
+        let candidates =
+            ChannelSelector::select(&self.channel_repo.list().await?, model, &mut rand::rng());
         if candidates.is_empty() {
             return Err(ProxyError::NoCandidateChannel(model.to_string()));
         }

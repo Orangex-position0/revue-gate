@@ -58,6 +58,11 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
       setSubmitError("名称不能为空");
       return;
     }
+    const weightNum = Number(weight);
+    if (Number.isFinite(weightNum) && weightNum < 0) {
+      setSubmitError("权重不能为负数");
+      return;
+    }
     const input: ChannelInput = {
       name: name.trim(),
       channelType,
@@ -204,12 +209,13 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
             </div>
             <div>
               <label className={labelCls} htmlFor="channel-weight">
-                权重
+                权重（同优先级内分摊；0 仅兜底）
               </label>
               <input
                 id="channel-weight"
                 className={inputCls}
                 type="number"
+                min={0}
                 value={weight}
                 onChange={(e) => setWeight(e.target.value)}
               />

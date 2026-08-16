@@ -45,7 +45,7 @@
 ### 请求转发
 
 - 非流式 + 流式代理
-- 流程：认证 → 选择候选渠道（按模型筛选 → 优先级排序）→ 应用模型映射 → 转发上游 → 解析 usage → 写日志 → 累加配额
+- 流程：认证 → 选择候选渠道（按模型筛选 → 优先级分组 → 组内权重随机）→ 应用模型映射 → 转发上游 → 解析 usage → 写日志 → 累加配额
 - 失败重试：按候选渠道顺序尝试下一个（最多不超过候选渠道数），每次失败写日志
 - 上游密钥不落库明文暴露给下游
 
@@ -122,7 +122,7 @@ src-tauri/src/
 │   ├── api_key.rs           #   ApiKey 聚合根：实体 + 配额值对象 + ApiKeyRepository trait
 │   ├── request_log.rs       #   RequestLog 聚合根：实体 + RequestLogRepository trait
 │   ├── provider.rs          #   ProviderAdaptor trait（供应商适配器接口）
-│   ├── dispatcher.rs        #   领域服务：渠道选择策略（按模型筛选 → 优先级排序）
+│   ├── dispatcher.rs        #   领域服务：渠道选择策略（按模型筛选 → 优先级分组 → 组内权重随机）
 │   └── quota.rs             #   领域服务：配额策略（QuotaPolicy）
 ├── usecases.rs              #   usecases 模块入口
 ├── usecases/                # 用例层：编排 domain + 调仓储，组织数据流

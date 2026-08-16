@@ -51,7 +51,7 @@ pub struct Channel {
     pub models: Vec<String>,
     /// Dispatch priority (smaller values take precedence; candidates sorted ascending by priority).
     pub priority: i32,
-    /// Weight field: v0.1 only persists and echoes it; weighted dispatch is a high-availability enhancement (Out of Scope).
+    /// Dispatch weight: proportional share when routing within a priority group (0 = fallback only, tried last).
     pub weight: i32,
     /// Model mapping table.
     pub model_mappings: Vec<ModelMapping>,

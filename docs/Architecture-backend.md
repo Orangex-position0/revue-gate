@@ -52,7 +52,7 @@ src-tauri/src/
 │   ├── api_key.rs           #   ApiKey 聚合根：实体 + 配额值对象 + ApiKeyRepository trait
 │   ├── request_log.rs       #   RequestLog 聚合根：实体 + RequestLogRepository trait
 │   ├── provider.rs          #   ProviderAdaptor trait（供应商适配器接口）
-│   ├── dispatcher.rs        #   领域服务：渠道选择策略（按模型筛选 → 优先级排序）
+│   ├── dispatcher.rs        #   领域服务：渠道选择策略（按模型筛选 → 优先级分组 → 组内权重随机）
 │   └── quota.rs             #   领域服务：配额策略（QuotaPolicy）
 ├── usecases.rs              #   usecases 模块入口
 ├── usecases/                # 用例层：编排 domain + 调仓储，组织数据流
@@ -99,7 +99,7 @@ src-tauri/src/
 | `api_key.rs` | `ApiKey` 实体（名称/密钥/启停/配额上限/已用额度）+ `Quota` 值对象 + `ApiKeyRepository` trait |
 | `request_log.rs` | `RequestLog` 实体（API Key/渠道/模型/usage/耗时/trace id/请求体/状态码）+ `RequestLogRepository` trait |
 | `provider.rs` | `ProviderAdaptor` trait：`channel_type` / `default_models` / `default_base_url` / `test` / `forward` / `forward_stream` |
-| `dispatcher.rs` | 领域服务 `ChannelSelector`：按模型筛选候选渠道 → 按优先级排序 |
+| `dispatcher.rs` | 领域服务 `ChannelSelector`：按模型筛选候选渠道 → 按优先级分组 → 组内权重随机 |
 | `quota.rs` | 领域服务 `QuotaPolicy`：校验配额是否超限 |
 
 **领域服务 vs 用例**：`dispatcher.rs`、`quota.rs` 只做纯业务判断（选哪个渠道、是否超配额），不碰 DB 和 HTTP；编排职责在 `usecases`。
@@ -142,7 +142,7 @@ HTTP 请求 /v1/chat/completions
   → http/handlers 解析 JSON、识别 stream、提取 Authorization Bearer
   → auth 用例：校验密钥（401）+ 配额（429）
   → proxy 用例：
-      dispatcher.ChannelSelector 选候选渠道（启用 → 按模型筛选 → 按优先级排序）
+      dispatcher.ChannelSelector 选候选渠道（启用 → 按模型筛选 → 优先级分组 → 组内权重随机）
       ProviderAdaptor 应用模型映射 → 转发上游
       解析 usage → 累加配额 → 写 RequestLog
   → 返回上游响应 / SSE 流式透传
