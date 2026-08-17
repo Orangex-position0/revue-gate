@@ -24,15 +24,17 @@ impl ChannelSelector {
     /// Select candidate channels and order them into a failover queue: enabled → model match → group by priority
     /// (ascending) → within each group, weighted random without replacement. The RNG is injected so tests can use a
     /// seeded generator; production passes `rand::rng()`.
-    pub fn select<R: Rng>(channels: &[Channel], model: &str, rng: &mut R) -> Vec<Channel> {
+    pub fn select_channels<R: Rng>(channels: &[Channel], model: &str, rng: &mut R) -> Vec<Channel> {
+        // 1. Filter candidates: keep enabled channels that support the requested model.
         let mut candidates: Vec<Channel> = channels
             .iter()
             .filter(|c| c.enabled && Self::supports(c, model))
             .cloned()
             .collect();
-        // Stable sort ascending by priority so equal-priority channels group together (input order preserved).
+        // 2. Stable sort ascending by priority so equal-priority channels group together (input order preserved).
         candidates.sort_by_key(|c| c.priority);
 
+        // 3. For each priority group, draw channels by weighted random without replacement and append to the queue.
         let mut ordered = Vec::with_capacity(candidates.len());
         let mut start = 0;
         while start < candidates.len() {
@@ -125,14 +127,14 @@ mod tests {
     #[test]
     fn select_drops_disabled_channels() {
         let channels = vec![channel("off", &["gpt-4o"], 0, false)];
-        assert!(ChannelSelector::select(&channels, "gpt-4o", &mut rng()).is_empty());
+        assert!(ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng()).is_empty());
     }
 
     /// `models` contains the requested model → selected.
     #[test]
     fn select_keeps_channel_when_model_in_models_list() {
         let channels = vec![channel("a", &["gpt-4o"], 1, true)];
-        let selected = ChannelSelector::select(&channels, "gpt-4o", &mut rng());
+        let selected = ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng());
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "a");
     }
@@ -141,7 +143,7 @@ mod tests {
     #[test]
     fn select_keeps_channel_via_mapping_client_model() {
         let channels = vec![mapped_channel("chat", "gpt-4o")];
-        let selected = ChannelSelector::select(&channels, "chat", &mut rng());
+        let selected = ChannelSelector::select_channels(&channels, "chat", &mut rng());
         assert_eq!(selected.len(), 1);
     }
 
@@ -150,7 +152,7 @@ mod tests {
     fn select_keeps_unrestricted_channel_with_empty_models() {
         let channels = vec![channel("any", &[], 0, true)];
         assert_eq!(
-            ChannelSelector::select(&channels, "anything-else", &mut rng()).len(),
+            ChannelSelector::select_channels(&channels, "anything-else", &mut rng()).len(),
             1
         );
     }
@@ -162,7 +164,7 @@ mod tests {
             channel("a", &["gpt-4o"], 0, true),
             channel("b", &["claude-3"], 0, true),
         ];
-        let selected = ChannelSelector::select(&channels, "claude-3", &mut rng());
+        let selected = ChannelSelector::select_channels(&channels, "claude-3", &mut rng());
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "b");
     }
@@ -177,7 +179,7 @@ mod tests {
         let c2 = channel("c2", &["gpt-4o"], 3, true);
 
         let channels = vec![a, b, c1, c2];
-        let names: Vec<String> = ChannelSelector::select(&channels, "gpt-4o", &mut rng())
+        let names: Vec<String> = ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng())
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -194,7 +196,7 @@ mod tests {
         let heavy = weighted("heavy", 0, 5);
         let zero = weighted("zero", 0, 0);
         let channels = vec![zero, heavy];
-        let names: Vec<String> = ChannelSelector::select(&channels, "gpt-4o", &mut rng())
+        let names: Vec<String> = ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng())
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -205,7 +207,7 @@ mod tests {
     #[test]
     fn select_single_channel_group_returns_it() {
         let only = weighted("only", 0, 1);
-        let selected = ChannelSelector::select(&[only], "gpt-4o", &mut rng());
+        let selected = ChannelSelector::select_channels(&[only], "gpt-4o", &mut rng());
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "only");
     }
@@ -215,7 +217,7 @@ mod tests {
     fn select_all_zero_weight_preserves_input_order() {
         let a = weighted("a", 0, 0);
         let b = weighted("b", 0, 0);
-        let names: Vec<String> = ChannelSelector::select(&[a, b], "gpt-4o", &mut rng())
+        let names: Vec<String> = ChannelSelector::select_channels(&[a, b], "gpt-4o", &mut rng())
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -228,7 +230,7 @@ mod tests {
         let neg = weighted("neg", 0, -5);
         let pos = weighted("pos", 0, 1);
         let channels = vec![neg, pos];
-        let names: Vec<String> = ChannelSelector::select(&channels, "gpt-4o", &mut rng())
+        let names: Vec<String> = ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng())
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -244,8 +246,11 @@ mod tests {
         for i in 0..trials {
             let heavy = weighted("heavy", 0, 9);
             let light = weighted("light", 0, 1);
-            let selected =
-                ChannelSelector::select(&[heavy, light], "gpt-4o", &mut SmallRng::seed_from_u64(i));
+            let selected = ChannelSelector::select_channels(
+                &[heavy, light],
+                "gpt-4o",
+                &mut SmallRng::seed_from_u64(i),
+            );
             if selected[0].name == "heavy" {
                 heavy_first += 1;
             }
@@ -260,7 +265,7 @@ mod tests {
     #[test]
     fn select_empty_when_no_candidates() {
         let channels = vec![channel("a", &["claude-3"], 0, true)];
-        assert!(ChannelSelector::select(&channels, "gpt-4o", &mut rng()).is_empty());
+        assert!(ChannelSelector::select_channels(&channels, "gpt-4o", &mut rng()).is_empty());
     }
 
     /// Property test (mandatory-tier PBT, algorithm): for arbitrary priority/weight combinations the queue must be
@@ -295,7 +300,7 @@ mod tests {
                         .wrapping_mul(31)
                         .wrapping_add(((*p as u64) << 32) ^ (*w as u64));
                 }
-                let selected = ChannelSelector::select(
+                let selected = ChannelSelector::select_channels(
                     &channels,
                     "m",
                     &mut SmallRng::seed_from_u64(seed),

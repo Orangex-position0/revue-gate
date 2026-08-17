@@ -153,8 +153,11 @@ impl ProxyRequestUsecase {
             .await?;
 
         // 2) Select candidate channels: enabled → model match → priority group → weighted random within group.
-        let candidates =
-            ChannelSelector::select(&self.channel_repo.list().await?, model, &mut rand::rng());
+        let candidates = ChannelSelector::select_channels(
+            &self.channel_repo.list().await?,
+            model,
+            &mut rand::rng(),
+        );
         if candidates.is_empty() {
             return Err(ProxyError::NoCandidateChannel(model.to_string()));
         }
