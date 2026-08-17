@@ -1,14 +1,15 @@
 //! Data plane: Axum route tree + trace propagation layer (see docs/Architecture-backend.md).
 //!
 //! `/v1/*` routes mount onto `AppState` (real usecases); `/health` is a static liveness endpoint.
-//! Middleware order (outermost first): `trace_id_middleware` (generate/reuse x-request-id) →
-//! `TraceLayer` (span carries trace_id + structured logs after the response). Layer call order is
-//! the reverse of wrapping order: later layers are outer, so trace_id_middleware is added last
-//! (the trace id is generated first so the span can read it).
+//! Middleware order (outermost first): `CorsLayer` (browser downstream, e.g. NextChat web) →
+//! `trace_id_middleware` (generate/reuse x-request-id) → `TraceLayer` (span carries trace_id +
+//! structured logs after the response). Layer call order is the reverse of wrapping order: later
+//! layers are outer, so CorsLayer is added last (it short-circuits preflight `OPTIONS` before auth).
 
 use axum::Router;
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use super::handlers::{
@@ -28,6 +29,11 @@ pub fn build_router(state: AppState) -> Router {
                 .on_response(TraceOnResponse),
         )
         .layer(from_fn(trace_id_middleware))
+        // Outermost: answer CORS for browser-based downstream (NextChat web etc.). `permissive()`
+        // = any origin / any method / any header, no credentials — the gateway is bound to 127.0.0.1
+        // and guarded by the Bearer key, not by origin; `*` works with fetch + Authorization header
+        // (non-credential), and short-circuits preflight `OPTIONS` before it can hit auth.
+        .layer(CorsLayer::permissive())
 }
 
 /// Health check: returns 200 with `{"status":"ok"}` so clients can confirm the gateway is online.
