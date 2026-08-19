@@ -361,6 +361,9 @@ fn build_log(
         .audit_policy
         .enabled
         .then(|| build_audit_scope(&ctx.request.body, &ctx.audit_policy));
+    let audit_report = audit_scope
+        .as_ref()
+        .map(|scope| AuditReport::for_scope(&ctx.audit_policy, scope));
     RequestLog {
         id: Uuid::now_v7(),
         api_key_id: Some(ctx.api_key.id),
@@ -380,17 +383,9 @@ fn build_log(
             .audit_policy
             .store_payload
             .then(|| ctx.request.body.to_string()),
-        risk_level: ctx
-            .audit_policy
-            .enabled
-            .then_some(crate::domain::security_audit::RiskLevel::Clean),
-        audit_action: ctx
-            .audit_policy
-            .enabled
-            .then_some(crate::domain::security_audit::AuditAction::Allow),
-        audit_report: audit_scope
-            .as_ref()
-            .map(|scope| AuditReport::clean_for_scope(&ctx.audit_policy, scope)),
+        risk_level: audit_report.as_ref().map(|report| report.risk_level),
+        audit_action: audit_report.as_ref().map(|report| report.action),
+        audit_report,
         created_at: Utc::now(),
     }
 }
@@ -709,6 +704,42 @@ mod tests {
         assert_eq!(log.request_body, None);
         assert_eq!(log.risk_level, Some(RiskLevel::Clean));
         assert!(log.audit_report.is_some());
+    }
+
+    /// Detector findings must drive the indexed log risk/action fields, not only the nested audit report.
+    #[tokio::test]
+    async fn audit_detector_findings_update_log_risk_and_action() {
+        let (uc, keys, channels, logs) = harness_with_settings(
+            single_ok_adaptor(ok_response(200, None)),
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": "leaked sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            }],
+        });
+
+        uc.execute(req).await.expect("success");
+
+        let log = all_request_logs(&*logs).await.pop().expect("log");
+        assert_eq!(log.risk_level, Some(RiskLevel::Critical));
+        assert_eq!(log.audit_action, Some(AuditAction::Block));
+        let report = log.audit_report.as_ref().expect("audit report");
+        assert_eq!(report.risk_level, RiskLevel::Critical);
+        assert_eq!(report.action, AuditAction::Block);
     }
 
     /// Model mapping: the requested client_model maps to upstream_model, and body["model"] is rewritten accordingly.
