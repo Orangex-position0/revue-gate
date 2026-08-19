@@ -447,6 +447,9 @@ mod tests {
             scan_byte_limit: 65536,
             truncated: false,
             evidence_level: crate::domain::security_audit::AuditEvidenceLevel::Summary,
+            upstream_forwarded: true,
+            planned_channel_id: log.channel_id,
+            planned_upstream_model: log.upstream_model.clone(),
         });
         repo.save(&log).await.expect("save");
 

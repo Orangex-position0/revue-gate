@@ -114,6 +114,9 @@ export interface AuditReport {
   scanByteLimit: number;
   truncated: boolean;
   evidenceLevel: AuditEvidenceLevel;
+  upstreamForwarded: boolean;
+  plannedChannelId: string | null;
+  plannedUpstreamModel: string | null;
 }
 
 /** Request log entity: the full audit record of one request (aligned with the backend RequestLog). */

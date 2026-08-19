@@ -188,12 +188,23 @@ impl ProxyRequestUsecase {
         let first_upstream_model = apply_mapping(&candidates[0], model);
         let audit_report = audit_policy.enabled.then(|| {
             let audit_scope = build_audit_scope(&request.body, &audit_policy);
-            AuditReport::for_scope(&audit_policy, &audit_scope)
+            AuditReport::for_scope(&audit_policy, &audit_scope).with_forwarding_context(
+                true,
+                candidates[0].id,
+                first_upstream_model.clone(),
+            )
         });
         if audit_report
             .as_ref()
             .is_some_and(|report| report.action == AuditAction::Block)
         {
+            let audit_report = audit_report.map(|report| {
+                report.with_forwarding_context(
+                    false,
+                    candidates[0].id,
+                    first_upstream_model.clone(),
+                )
+            });
             let ctx = AttemptContext {
                 request,
                 api_key,
@@ -919,6 +930,9 @@ mod tests {
         let report = log.audit_report.as_ref().expect("audit report");
         assert_eq!(report.action, AuditAction::Block);
         assert_eq!(report.risk_score, 100);
+        assert!(!report.upstream_forwarded);
+        assert_eq!(report.planned_channel_id, Some(channel.id));
+        assert_eq!(report.planned_upstream_model.as_deref(), Some("gpt-4o"));
     }
 
     /// Model mapping: the requested client_model maps to upstream_model, and body["model"] is rewritten accordingly.
@@ -1085,6 +1099,72 @@ mod tests {
 
         let saved = keys.find_by_id(key.id).await.expect("find").expect("found");
         assert_eq!(saved.quota.used, 15, "失败尝试不计配额，只累加成功 usage");
+    }
+
+    /// One logical request is audited once before retry attempts; each attempt log reuses the same report and trace id.
+    #[tokio::test]
+    async fn retry_attempt_logs_reuse_one_audit_report_for_logical_request() {
+        let adaptor = move |c: &Channel| -> Box<dyn ProviderAdaptor> {
+            match c.name.as_str() {
+                "a" => Box::new(MockForwardAdaptor::new(
+                    Ok(ProviderResponse {
+                        status_code: 500,
+                        body: vec![],
+                        usage: None,
+                    }),
+                    Ok(vec![]),
+                )),
+                "b" => Box::new(MockForwardAdaptor::new(
+                    Ok(ok_response(200, Some(usage(10, 5, 15)))),
+                    Ok(vec![]),
+                )),
+                _ => unreachable!("unexpected channel"),
+            }
+        };
+        let (uc, keys, channels, logs) = harness_with_settings(
+            adaptor,
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        let mut first = save_channel(&channels, "a", &["gpt-4o"], 0).await;
+        first.model_mappings = vec![ModelMapping {
+            client_model: "gpt-4o".to_string(),
+            upstream_model: "gpt-4o-first".to_string(),
+        }];
+        channels.save(&first).await.expect("save mapping");
+        save_channel(&channels, "b", &["gpt-4o"], 1).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.trace_id = "trace-retry-audit".to_string();
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello audit retry"}],
+        });
+
+        uc.execute(req).await.expect("retry success");
+
+        let logs = all_request_logs(&*logs).await;
+        assert_eq!(logs.len(), 2, "retry writes one log per attempt");
+        assert!(
+            logs.iter().all(|log| log.trace_id == "trace-retry-audit"),
+            "trace id groups all attempts for one logical request"
+        );
+        let first_report = logs[0].audit_report.as_ref().expect("first report");
+        let second_report = logs[1].audit_report.as_ref().expect("second report");
+        assert_eq!(first_report, second_report, "attempt logs reuse one report");
+        assert!(first_report.upstream_forwarded);
+        assert_eq!(first_report.planned_channel_id, Some(first.id));
+        assert_eq!(
+            first_report.planned_upstream_model.as_deref(),
+            Some("gpt-4o-first")
+        );
     }
 
     /// Transport error is retryable: candidate a's forward returns ProviderError (missing status code recorded as 502), candidate b succeeds.

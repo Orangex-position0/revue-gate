@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 const DETECTOR_FINDING_LIMIT: usize = 20;
 const REPORT_FINDING_LIMIT: usize = 50;
@@ -197,6 +198,12 @@ pub struct AuditReport {
     pub scan_byte_limit: u32,
     pub truncated: bool,
     pub evidence_level: AuditEvidenceLevel,
+    #[serde(default = "default_upstream_forwarded")]
+    pub upstream_forwarded: bool,
+    #[serde(default)]
+    pub planned_channel_id: Option<Uuid>,
+    #[serde(default)]
+    pub planned_upstream_model: Option<String>,
 }
 
 /// One deterministic detector finding emitted from a scanned request scope.
@@ -234,6 +241,9 @@ impl AuditReport {
             scan_byte_limit: scope.scan_byte_limit,
             truncated: scope.truncated,
             evidence_level: policy.evidence_level,
+            upstream_forwarded: true,
+            planned_channel_id: None,
+            planned_upstream_model: None,
         }
     }
 
@@ -270,8 +280,27 @@ impl AuditReport {
             scan_byte_limit: scope.scan_byte_limit,
             truncated: scope.truncated,
             evidence_level: policy.evidence_level,
+            upstream_forwarded: true,
+            planned_channel_id: None,
+            planned_upstream_model: None,
         }
     }
+
+    pub fn with_forwarding_context(
+        mut self,
+        upstream_forwarded: bool,
+        planned_channel_id: Uuid,
+        planned_upstream_model: String,
+    ) -> Self {
+        self.upstream_forwarded = upstream_forwarded;
+        self.planned_channel_id = Some(planned_channel_id);
+        self.planned_upstream_model = Some(planned_upstream_model);
+        self
+    }
+}
+
+fn default_upstream_forwarded() -> bool {
+    true
 }
 
 const ENGLISH_PROMPT_INJECTION_PHRASES: &[&str] = &[
