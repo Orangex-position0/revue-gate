@@ -17,6 +17,7 @@ dist-ssr
 
 # Scratch / working notes (local only, not committed)
 .scratch/
+.worktrees/
 
 # Editor directories and files
 .vscode/*
