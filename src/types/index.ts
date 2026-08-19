@@ -107,6 +107,7 @@ export interface AuditReport {
   action: AuditAction;
   findings: AuditFinding[];
   scannedBytes: number;
+  candidateBytes: number;
   scanByteLimit: number;
   truncated: boolean;
   evidenceLevel: AuditEvidenceLevel;

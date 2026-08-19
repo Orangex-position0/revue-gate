@@ -27,7 +27,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
-use crate::domain::security_audit::{AuditPolicy, AuditReport};
+use crate::domain::security_audit::{AuditPolicy, AuditReport, build_audit_scope};
 use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
@@ -357,6 +357,10 @@ fn build_log(
     usage: Option<Usage>,
     error_message: Option<String>,
 ) -> RequestLog {
+    let audit_scope = ctx
+        .audit_policy
+        .enabled
+        .then(|| build_audit_scope(&ctx.request.body, &ctx.audit_policy));
     RequestLog {
         id: Uuid::now_v7(),
         api_key_id: Some(ctx.api_key.id),
@@ -384,10 +388,9 @@ fn build_log(
             .audit_policy
             .enabled
             .then_some(crate::domain::security_audit::AuditAction::Allow),
-        audit_report: ctx
-            .audit_policy
-            .enabled
-            .then(|| AuditReport::clean(&ctx.audit_policy)),
+        audit_report: audit_scope
+            .as_ref()
+            .map(|scope| AuditReport::clean_for_scope(&ctx.audit_policy, scope)),
         created_at: Utc::now(),
     }
 }
@@ -657,9 +660,14 @@ mod tests {
         let key = save_key(&keys).await;
         save_channel(&channels, "a", &["gpt-4o"], 0).await;
 
-        uc.execute(request(Some(&key.key), "gpt-4o", false))
-            .await
-            .expect("success");
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello audit"}],
+        });
+
+        uc.execute(req).await.expect("success");
 
         let logs = all_request_logs(&*logs).await;
         assert_eq!(logs.len(), 1);
@@ -670,6 +678,10 @@ mod tests {
         assert_eq!(report.risk_level, RiskLevel::Clean);
         assert_eq!(report.action, AuditAction::Allow);
         assert!(report.findings.is_empty());
+        assert_eq!(report.scanned_bytes, 11);
+        assert_eq!(report.candidate_bytes, 11);
+        assert_eq!(report.scan_byte_limit, 64 * 1024);
+        assert!(!report.truncated);
     }
 
     /// store_payload=false removes the raw request body but keeps the structured audit projection.

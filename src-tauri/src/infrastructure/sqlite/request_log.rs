@@ -440,6 +440,7 @@ mod tests {
             action: AuditAction::Allow,
             findings: Vec::new(),
             scanned_bytes: 0,
+            candidate_bytes: 0,
             scan_byte_limit: 65536,
             truncated: false,
             evidence_level: crate::domain::security_audit::AuditEvidenceLevel::Summary,
