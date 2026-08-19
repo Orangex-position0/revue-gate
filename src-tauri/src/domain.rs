@@ -10,4 +10,5 @@ pub mod error;
 pub mod provider;
 pub mod quota;
 pub mod request_log;
+pub mod security_audit;
 pub mod settings;

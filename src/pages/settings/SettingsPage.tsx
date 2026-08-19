@@ -22,6 +22,7 @@ export function SettingsPage() {
   // Numeric fields are carried as strings and parsed/validated on save (consistent with the ApiKeyForm quota semantics).
   const [portInput, setPortInput] = useState("");
   const [retryInput, setRetryInput] = useState("");
+  const [auditScanLimitInput, setAuditScanLimitInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -39,6 +40,7 @@ export function SettingsPage() {
       setRetryInput(
         loaded.retry.max_retries != null ? String(loaded.retry.max_retries) : "",
       );
+      setAuditScanLimitInput(String(loaded.audit.scanByteLimit));
       setLoadError(null);
     } catch (error) {
       setLoadError(invokeErrorMessage(error));
@@ -62,6 +64,14 @@ export function SettingsPage() {
       prev ? { ...prev, retry: { ...prev.retry, enabled } } : prev,
     );
 
+  const setAuditField = <K extends keyof GatewaySettings["audit"]>(
+    key: K,
+    value: GatewaySettings["audit"][K],
+  ) =>
+    setSettings((prev) =>
+      prev ? { ...prev, audit: { ...prev.audit, [key]: value } } : prev,
+    );
+
   async function handleSave() {
     if (!settings) return;
     const parsedPort = Number(portInput);
@@ -77,6 +87,15 @@ export function SettingsPage() {
       setSaveError("重试次数必须是非负整数，留空表示无上限");
       return;
     }
+    const parsedScanLimit = Number(auditScanLimitInput);
+    if (
+      !Number.isInteger(parsedScanLimit) ||
+      parsedScanLimit < 0 ||
+      parsedScanLimit > 10_000_000
+    ) {
+      setSaveError("审计扫描字节上限必须是 0-10000000 的整数");
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     setSavedAt(null);
@@ -89,6 +108,10 @@ export function SettingsPage() {
         closeToTray: settings.closeToTray,
         autostart: settings.autostart,
         retry: { enabled: settings.retry.enabled, max_retries: parsedRetry },
+        audit: {
+          ...settings.audit,
+          scanByteLimit: parsedScanLimit,
+        },
       });
       setSavedAt(new Date().toLocaleTimeString());
     } catch (error) {
@@ -293,6 +316,116 @@ export function SettingsPage() {
                 <p className={hintCls}>
                   首次请求失败后按渠道优先级逐个重试；次数为首次之后的额外尝试次数。
                 </p>
+              </div>
+            </div>
+          </section>
+
+          {/* 安全审计策略 */}
+          <section className={cardCls}>
+            <h3 className="mb-3 text-base font-semibold">安全审计</h3>
+            <div className="space-y-4">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={settings.audit.enabled}
+                  onChange={(e) => setAuditField("enabled", e.target.checked)}
+                  className="h-4 w-4 accent-[var(--primary)]"
+                />
+                启用请求审计
+              </label>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls} htmlFor="settings-audit-mode">
+                    模式
+                  </label>
+                  <select
+                    id="settings-audit-mode"
+                    className={inputCls}
+                    value={settings.audit.mode}
+                    onChange={(e) =>
+                      setAuditField(
+                        "mode",
+                        e.target.value as GatewaySettings["audit"]["mode"],
+                      )
+                    }
+                    disabled={!settings.audit.enabled}
+                  >
+                    <option value="observe">观察</option>
+                    <option value="enforce">拦截</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls} htmlFor="settings-audit-limit">
+                    扫描字节上限
+                  </label>
+                  <input
+                    id="settings-audit-limit"
+                    className={inputCls}
+                    type="number"
+                    min={0}
+                    max={10000000}
+                    value={auditScanLimitInput}
+                    onChange={(e) => setAuditScanLimitInput(e.target.value)}
+                    disabled={!settings.audit.enabled}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls} htmlFor="settings-audit-evidence">
+                    证据级别
+                  </label>
+                  <select
+                    id="settings-audit-evidence"
+                    className={inputCls}
+                    value={settings.audit.evidenceLevel}
+                    onChange={(e) =>
+                      setAuditField(
+                        "evidenceLevel",
+                        e.target.value as GatewaySettings["audit"]["evidenceLevel"],
+                      )
+                    }
+                    disabled={!settings.audit.enabled}
+                  >
+                    <option value="summary">摘要</option>
+                    <option value="detailed">详细</option>
+                  </select>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={settings.audit.blockCritical}
+                    onChange={(e) =>
+                      setAuditField("blockCritical", e.target.checked)
+                    }
+                    disabled={!settings.audit.enabled}
+                    className="h-4 w-4 accent-[var(--primary)] disabled:opacity-50"
+                  />
+                  拦截 critical 风险
+                </label>
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={settings.audit.scanSystemMessages}
+                    onChange={(e) =>
+                      setAuditField("scanSystemMessages", e.target.checked)
+                    }
+                    disabled={!settings.audit.enabled}
+                    className="h-4 w-4 accent-[var(--primary)] disabled:opacity-50"
+                  />
+                  扫描 system messages
+                </label>
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={settings.audit.storePayload}
+                    onChange={(e) =>
+                      setAuditField("storePayload", e.target.checked)
+                    }
+                    className="h-4 w-4 accent-[var(--primary)]"
+                  />
+                  保存原始请求体
+                </label>
               </div>
             </div>
           </section>

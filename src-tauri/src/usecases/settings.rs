@@ -78,6 +78,8 @@ mod tests {
         assert_eq!(settings.theme, Theme::System);
         assert!(settings.retry.enabled);
         assert_eq!(settings.retry.max_retries, None);
+        assert!(!settings.audit.enabled);
+        assert!(settings.audit.store_payload);
     }
 
     /// Save then load: every field round-trips consistently (including nested config such as the retry policy).
@@ -94,6 +96,12 @@ mod tests {
             retry: crate::domain::settings::RetryPolicy {
                 enabled: true,
                 max_retries: Some(3),
+            },
+            audit: crate::domain::security_audit::AuditSettings {
+                enabled: true,
+                scan_byte_limit: 4096,
+                store_payload: false,
+                ..Default::default()
             },
         };
 

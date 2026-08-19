@@ -27,6 +27,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
+use crate::domain::security_audit::{AuditPolicy, AuditReport};
 use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
@@ -165,12 +166,13 @@ impl ProxyRequestUsecase {
         // 2b) The retry policy (shared settings, read at execute time) determines the max attempts this round:
         //     disabled → try only the first candidate; enabled and unlimited → all candidates (ticket 07 default behavior);
         //     enabled with limit n → at most n more tries after the first (total attempts = n + 1), capped by the candidate count.
-        let retry = self
+        let settings = self
             .settings
             .read()
             .expect("settings lock poisoned")
-            .retry
             .clone();
+        let retry = settings.retry;
+        let audit_policy = AuditPolicy::from(&settings.audit);
         let max_attempts = if retry.enabled {
             retry
                 .max_retries
@@ -203,6 +205,7 @@ impl ProxyRequestUsecase {
                 channel: channel.clone(),
                 upstream_model: upstream_model.clone(),
                 is_retry: attempts > 1,
+                audit_policy: audit_policy.clone(),
                 started: Instant::now(),
             };
 
@@ -309,6 +312,7 @@ struct AttemptContext {
     channel: Channel,
     upstream_model: String,
     is_retry: bool,
+    audit_policy: AuditPolicy,
     started: Instant,
 }
 
@@ -368,7 +372,22 @@ fn build_log(
         is_stream: ctx.request.stream,
         is_retry: ctx.is_retry,
         trace_id: ctx.request.trace_id.clone(),
-        request_body: Some(ctx.request.body.to_string()),
+        request_body: ctx
+            .audit_policy
+            .store_payload
+            .then(|| ctx.request.body.to_string()),
+        risk_level: ctx
+            .audit_policy
+            .enabled
+            .then_some(crate::domain::security_audit::RiskLevel::Clean),
+        audit_action: ctx
+            .audit_policy
+            .enabled
+            .then_some(crate::domain::security_audit::AuditAction::Allow),
+        audit_report: ctx
+            .audit_policy
+            .enabled
+            .then(|| AuditReport::clean(&ctx.audit_policy)),
         created_at: Utc::now(),
     }
 }
@@ -459,6 +478,7 @@ mod tests {
     use super::*;
     use crate::domain::channel::ModelMapping;
     use crate::domain::provider::Usage;
+    use crate::domain::security_audit::{AuditAction, AuditSettings, RiskLevel};
     use crate::domain::settings::RetryPolicy;
     use crate::test_support::{
         InMemoryApiKeyRepository, InMemoryChannelRepository, InMemoryRequestLogRepository,
@@ -516,10 +536,10 @@ mod tests {
         }
     }
 
-    /// Assemble the use case + shared repositories + shared settings with the given retry policy (the test keeps the Arcs to assert logs / quota afterwards).
-    fn harness_with_retry(
+    /// Assemble the use case + shared repositories + shared settings (the test keeps the Arcs to assert logs / quota afterwards).
+    fn harness_with_settings(
         adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
-        retry: RetryPolicy,
+        settings: GatewaySettings,
     ) -> (
         ProxyRequestUsecase,
         Arc<InMemoryApiKeyRepository>,
@@ -529,10 +549,7 @@ mod tests {
         let keys = Arc::new(InMemoryApiKeyRepository::new());
         let channels = Arc::new(InMemoryChannelRepository::new());
         let logs = Arc::new(InMemoryRequestLogRepository::new());
-        let settings = Arc::new(RwLock::new(GatewaySettings {
-            retry,
-            ..GatewaySettings::default()
-        }));
+        let settings = Arc::new(RwLock::new(settings));
         let uc = ProxyRequestUsecase::new(
             Arc::clone(&keys) as Arc<dyn ApiKeyRepository>,
             Arc::clone(&channels) as Arc<dyn ChannelRepository>,
@@ -541,6 +558,25 @@ mod tests {
             settings,
         );
         (uc, keys, channels, logs)
+    }
+
+    /// Assemble the use case + shared repositories + shared settings with the given retry policy.
+    fn harness_with_retry(
+        adaptor: impl Fn(&Channel) -> Box<dyn ProviderAdaptor> + Send + Sync + 'static,
+        retry: RetryPolicy,
+    ) -> (
+        ProxyRequestUsecase,
+        Arc<InMemoryApiKeyRepository>,
+        Arc<InMemoryChannelRepository>,
+        Arc<InMemoryRequestLogRepository>,
+    ) {
+        harness_with_settings(
+            adaptor,
+            GatewaySettings {
+                retry,
+                ..GatewaySettings::default()
+            },
+        )
     }
 
     /// Assemble with the default retry policy (enabled, unlimited): existing test semantics unchanged (ticket 07 tries one by one).
@@ -593,6 +629,9 @@ mod tests {
         assert!(!log.is_stream);
         assert!(!log.is_retry);
         assert_eq!(log.error_message, None);
+        assert_eq!(log.risk_level, None);
+        assert_eq!(log.audit_action, None);
+        assert_eq!(log.audit_report, None);
 
         let saved = keys
             .find_by_id(key.id)
@@ -600,6 +639,64 @@ mod tests {
             .expect("find key")
             .expect("found");
         assert_eq!(saved.quota.used, 15, "配额累加 total tokens");
+    }
+
+    /// Audit enabled with no detectors writes a clean allow report while preserving the normal forwarding path.
+    #[tokio::test]
+    async fn audit_enabled_success_records_clean_allow_report() {
+        let (uc, keys, channels, logs) = harness_with_settings(
+            single_ok_adaptor(ok_response(200, None)),
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        uc.execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect("success");
+
+        let logs = all_request_logs(&*logs).await;
+        assert_eq!(logs.len(), 1);
+        let log = &logs[0];
+        assert_eq!(log.risk_level, Some(RiskLevel::Clean));
+        assert_eq!(log.audit_action, Some(AuditAction::Allow));
+        let report = log.audit_report.as_ref().expect("audit report");
+        assert_eq!(report.risk_level, RiskLevel::Clean);
+        assert_eq!(report.action, AuditAction::Allow);
+        assert!(report.findings.is_empty());
+    }
+
+    /// store_payload=false removes the raw request body but keeps the structured audit projection.
+    #[tokio::test]
+    async fn audit_store_payload_false_omits_request_body_only() {
+        let (uc, keys, channels, logs) = harness_with_settings(
+            single_ok_adaptor(ok_response(200, None)),
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    store_payload: false,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        uc.execute(request(Some(&key.key), "gpt-4o", false))
+            .await
+            .expect("success");
+
+        let log = all_request_logs(&*logs).await.pop().expect("log");
+        assert_eq!(log.request_body, None);
+        assert_eq!(log.risk_level, Some(RiskLevel::Clean));
+        assert!(log.audit_report.is_some());
     }
 
     /// Model mapping: the requested client_model maps to upstream_model, and body["model"] is rewritten accordingly.

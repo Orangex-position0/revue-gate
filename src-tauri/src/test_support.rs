@@ -125,6 +125,9 @@ pub(crate) fn sample_request_log() -> RequestLog {
         is_retry: false,
         trace_id: Uuid::now_v7().to_string(),
         request_body: None,
+        risk_level: None,
+        audit_action: None,
+        audit_report: None,
         created_at: Utc::now(),
     }
 }
@@ -541,6 +544,9 @@ mod tests {
             is_retry: false,
             trace_id: Uuid::now_v7().to_string(),
             request_body: None,
+            risk_level: None,
+            audit_action: None,
+            audit_report: None,
             created_at: Utc::now(),
         };
         repo.save(&log).await.expect("save");

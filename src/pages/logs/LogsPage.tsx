@@ -65,6 +65,21 @@ function TinyBadge({ label }: { label: string }) {
   );
 }
 
+function auditBadge(log: RequestLog) {
+  if (!log.riskLevel || !log.auditAction) {
+    return <TinyBadge label="未审计" />;
+  }
+  const cls =
+    log.riskLevel === "clean"
+      ? "bg-success/10 text-success"
+      : "bg-danger/10 text-danger";
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-xs ${cls}`}>
+      {log.riskLevel === "clean" ? "Clean" : log.riskLevel} / {log.auditAction}
+    </span>
+  );
+}
+
 /** Log detail modal: route / usage / conversation / request params / tool tags / raw JSON. */
 interface LogDetailModalProps {
   detail: LogDetail;
@@ -145,6 +160,17 @@ function LogDetailModal({
               <dd className="text-danger">{detail.errorMessage}</dd>
             </div>
           )}
+          <div className="col-span-2">
+            <dt className="text-muted-foreground">安全审计</dt>
+            <dd className="mt-1 flex flex-wrap items-center gap-2">
+              {auditBadge(detail)}
+              {detail.auditReport && (
+                <span className="text-xs text-muted-foreground">
+                  {detail.auditReport.mode} / {detail.auditReport.findings.length} 条发现
+                </span>
+              )}
+            </dd>
+          </div>
         </dl>
 
         {/* Conversation */}
@@ -536,6 +562,7 @@ export function LogsPage() {
               <th className="px-3 py-2">Tokens</th>
               <th className="px-3 py-2">耗时</th>
               <th className="px-3 py-2">标记</th>
+              <th className="px-3 py-2">审计</th>
               <th className="px-3 py-2">渠道</th>
               <th className="px-3 py-2">密钥</th>
               <th className="px-3 py-2 text-right">操作</th>
@@ -544,13 +571,13 @@ export function LogsPage() {
           <tbody className="divide-y divide-border">
             {loading ? (
               <tr>
-                <td className={cellCls} colSpan={9}>
+                <td className={cellCls} colSpan={10}>
                   加载中…
                 </td>
               </tr>
             ) : logs.length === 0 ? (
               <tr>
-                <td className={cellCls} colSpan={9}>
+                <td className={cellCls} colSpan={10}>
                   暂无日志{total === 0 ? "，发起请求后自动记录" : "（调整筛选条件）"}。
                 </td>
               </tr>
@@ -605,6 +632,7 @@ export function LogsPage() {
                       )}
                     </div>
                   </td>
+                  <td className={cellCls}>{auditBadge(log)}</td>
                   <td className={`${cellCls} text-muted-foreground`}>
                     {channelNameOf(log.channelId)}
                   </td>

@@ -86,6 +86,32 @@ export interface LogQuery {
   endAt?: string | null;
 }
 
+/** Security audit projection types: aligned with the backend security_audit domain module. */
+export type RiskLevel = "clean" | "low" | "medium" | "high" | "critical";
+export type AuditAction = "allow" | "logOnly" | "warn" | "redact" | "confirm" | "block";
+export type AuditMode = "observe" | "enforce";
+export type AuditEvidenceLevel = "summary" | "detailed";
+
+export interface AuditFinding {
+  ruleId: string;
+  category: string;
+  riskLevel: RiskLevel;
+  action: AuditAction;
+  path: string;
+  evidence: string | null;
+}
+
+export interface AuditReport {
+  mode: AuditMode;
+  riskLevel: RiskLevel;
+  action: AuditAction;
+  findings: AuditFinding[];
+  scannedBytes: number;
+  scanByteLimit: number;
+  truncated: boolean;
+  evidenceLevel: AuditEvidenceLevel;
+}
+
 /** Request log entity: the full audit record of one request (aligned with the backend RequestLog). */
 export interface RequestLog {
   id: string;
@@ -103,6 +129,9 @@ export interface RequestLog {
   isRetry: boolean;
   traceId: string;
   requestBody: string | null;
+  riskLevel: RiskLevel | null;
+  auditAction: AuditAction | null;
+  auditReport: AuditReport | null;
   createdAt: string;
 }
 
@@ -164,6 +193,16 @@ export interface RetryPolicy {
   max_retries: number | null;
 }
 
+export interface AuditSettings {
+  enabled: boolean;
+  mode: AuditMode;
+  blockCritical: boolean;
+  scanSystemMessages: boolean;
+  scanByteLimit: number;
+  storePayload: boolean;
+  evidenceLevel: AuditEvidenceLevel;
+}
+
 /** Gateway settings snapshot: aligned with the backend GatewaySettings serde camelCase; port 0 = random port. */
 export interface GatewaySettings {
   host: string;
@@ -173,4 +212,5 @@ export interface GatewaySettings {
   closeToTray: boolean;
   autostart: boolean;
   retry: RetryPolicy;
+  audit: AuditSettings;
 }

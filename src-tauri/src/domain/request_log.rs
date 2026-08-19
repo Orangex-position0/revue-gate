@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
+use crate::domain::security_audit::{AuditAction, AuditReport, RiskLevel};
 
 /// RequestLog entity: the complete audit record of one request.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -42,6 +43,12 @@ pub struct RequestLog {
     pub trace_id: String,
     /// Client request body (raw JSON).
     pub request_body: Option<String>,
+    /// Request-level audit risk. None means audit was disabled for this request.
+    pub risk_level: Option<RiskLevel>,
+    /// Final audit action. None means audit was disabled for this request.
+    pub audit_action: Option<AuditAction>,
+    /// Structured audit report projection. None means audit was disabled for this request.
+    pub audit_report: Option<AuditReport>,
     pub created_at: DateTime<Utc>,
 }
 

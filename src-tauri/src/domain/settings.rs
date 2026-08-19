@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::error::RepositoryError;
+use crate::domain::security_audit::AuditSettings;
 
 /// Three-state UI theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -57,6 +58,8 @@ pub struct GatewaySettings {
     pub autostart: bool,
     /// Failure retry policy.
     pub retry: RetryPolicy,
+    /// Request-time security audit policy controls.
+    pub audit: AuditSettings,
 }
 
 impl Default for GatewaySettings {
@@ -69,6 +72,7 @@ impl Default for GatewaySettings {
             close_to_tray: false,
             autostart: false,
             retry: RetryPolicy::default(),
+            audit: AuditSettings::default(),
         }
     }
 }
@@ -100,6 +104,11 @@ mod tests {
             autostart in prop::bool::ANY,
             retry_enabled in prop::bool::ANY,
             max_retries in prop::option::of(0u32..=100),
+            audit_enabled in prop::bool::ANY,
+            block_critical in prop::bool::ANY,
+            scan_system in prop::bool::ANY,
+            scan_byte_limit in 0u32..=1_000_000u32,
+            store_payload in prop::bool::ANY,
         ) {
             let settings = GatewaySettings {
                 host,
@@ -109,6 +118,14 @@ mod tests {
                 close_to_tray: close,
                 autostart,
                 retry: RetryPolicy { enabled: retry_enabled, max_retries },
+                audit: AuditSettings {
+                    enabled: audit_enabled,
+                    block_critical,
+                    scan_system_messages: scan_system,
+                    scan_byte_limit,
+                    store_payload,
+                    ..AuditSettings::default()
+                },
             };
             let value = serde_json::to_value(&settings).expect("serialize");
             let back: GatewaySettings = serde_json::from_value(value).expect("deserialize");

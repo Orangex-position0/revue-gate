@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
+use crate::domain::security_audit::{AuditAction, AuditReport, RiskLevel};
 
-/// Row mapping for the request log table: one-to-one with the request_logs columns in `migrations/001_init.sql`.
+/// Row mapping for the request log table: one-to-one with the current request_logs schema.
 /// INTEGER columns are read as i64, then converted to the domain layer's narrow types via `TryFrom`.
 #[derive(FromRow)]
 struct RequestLogDb {
@@ -35,6 +36,9 @@ struct RequestLogDb {
     is_retry: bool,
     trace_id: String,
     request_body: Option<String>,
+    risk_level: Option<String>,
+    audit_action: Option<String>,
+    audit_report: Option<String>,
     created_at: String,
 }
 
@@ -50,7 +54,7 @@ struct StatRowDb {
 /// SELECT column list (shared by all queries to avoid repetition).
 const SELECT_COLUMNS: &str = "id, api_key_id, channel_id, model, upstream_model, status_code, \
      prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, \
-     is_retry, trace_id, request_body, created_at";
+     is_retry, trace_id, request_body, risk_level, audit_action, audit_report, created_at";
 
 /// RequestLogRepository implementation backed by an sqlx pool.
 pub struct SqliteRequestLogRepository {
@@ -70,8 +74,9 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         sqlx::query(
             "INSERT INTO request_logs (id, api_key_id, channel_id, model, upstream_model, \
                 status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, \
-                error_message, is_stream, is_retry, trace_id, request_body, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                error_message, is_stream, is_retry, trace_id, request_body, risk_level, \
+                audit_action, audit_report, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(log.id.to_string())
         .bind(log.api_key_id.map(|id| id.to_string()))
@@ -88,6 +93,15 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         .bind(log.is_retry)
         .bind(&log.trace_id)
         .bind(&log.request_body)
+        .bind(log.risk_level.map(audit_value).transpose()?)
+        .bind(log.audit_action.map(audit_value).transpose()?)
+        .bind(
+            log.audit_report
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| bad_row(&format!("invalid audit_report: {e}")))?,
+        )
         .bind(fmt_time(log.created_at))
         .execute(&self.pool)
         .await
@@ -312,9 +326,41 @@ impl TryFrom<RequestLogDb> for RequestLog {
             is_retry: row.is_retry,
             trace_id: row.trace_id,
             request_body: row.request_body,
+            risk_level: row
+                .risk_level
+                .as_deref()
+                .map(parse_audit_value::<RiskLevel>)
+                .transpose()?,
+            audit_action: row
+                .audit_action
+                .as_deref()
+                .map(parse_audit_value::<AuditAction>)
+                .transpose()?,
+            audit_report: row
+                .audit_report
+                .as_deref()
+                .map(parse_audit_report)
+                .transpose()?,
             created_at: parse_utc(&row.created_at)?,
         })
     }
+}
+
+fn audit_value<T: serde::Serialize>(value: T) -> Result<String, RepositoryError> {
+    serde_json::to_value(value)
+        .map_err(|e| bad_row(&format!("invalid audit value: {e}")))?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| bad_row("audit value did not serialize as a string"))
+}
+
+fn parse_audit_value<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, RepositoryError> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|e| bad_row(&format!("invalid audit value {value:?}: {e}")))
+}
+
+fn parse_audit_report(value: &str) -> Result<AuditReport, RepositoryError> {
+    serde_json::from_str(value).map_err(|e| bad_row(&format!("invalid audit_report: {e}")))
 }
 
 /// Narrows a stored signed i64 to the domain layer's narrow integer type (negative or overflow values
@@ -386,6 +432,18 @@ mod tests {
         log.is_retry = true;
         log.trace_id = "trace-abc".to_string();
         log.request_body = Some(r#"{"model":"gpt-4o"}"#.to_string());
+        log.risk_level = Some(RiskLevel::Clean);
+        log.audit_action = Some(AuditAction::Allow);
+        log.audit_report = Some(AuditReport {
+            mode: crate::domain::security_audit::AuditMode::Observe,
+            risk_level: RiskLevel::Clean,
+            action: AuditAction::Allow,
+            findings: Vec::new(),
+            scanned_bytes: 0,
+            scan_byte_limit: 65536,
+            truncated: false,
+            evidence_level: crate::domain::security_audit::AuditEvidenceLevel::Summary,
+        });
         repo.save(&log).await.expect("save");
 
         let found = repo.find_by_id(log.id).await.expect("find").expect("found");
