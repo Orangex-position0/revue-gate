@@ -12,7 +12,17 @@ import {
   X,
 } from "lucide-react";
 import { apiKeyApi, channelApi, logApi, invokeErrorMessage } from "@/lib/api";
-import type { ApiKey, Channel, LogDetail, LogQuery, RequestLog } from "@/types";
+import type {
+  ApiKey,
+  AuditAction,
+  AuditConfidence,
+  AuditScopeKind,
+  Channel,
+  LogDetail,
+  LogQuery,
+  RequestLog,
+  RiskLevel,
+} from "@/types";
 
 const inputCls =
   "w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary";
@@ -65,18 +75,168 @@ function TinyBadge({ label }: { label: string }) {
   );
 }
 
+const riskStyles: Record<RiskLevel, string> = {
+  clean: "bg-success/10 text-success",
+  info: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  low: "bg-lime-500/10 text-lime-700 dark:text-lime-300",
+  medium: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+  high: "bg-orange-500/10 text-orange-700 dark:text-orange-300",
+  critical: "bg-danger/10 text-danger",
+};
+
+const riskLabels: Record<RiskLevel, string> = {
+  clean: "Clean",
+  info: "Info",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  critical: "Critical",
+};
+
+const actionLabels: Record<AuditAction, string> = {
+  allow: "Allow",
+  logOnly: "Log only",
+  warn: "Warn",
+  redact: "Redact",
+  confirm: "Confirm",
+  block: "Block",
+};
+
+const confidenceLabels: Record<AuditConfidence, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+};
+
+const scopeLabels: Record<AuditScopeKind, string> = {
+  messageContent: "消息内容",
+  systemMessageContent: "System 消息",
+  toolCallArguments: "工具调用参数",
+  toolName: "工具名称",
+  toolDescription: "工具描述",
+  toolSchemaString: "工具 Schema 文本",
+  toolSchemaKey: "工具 Schema 键",
+  topLevelParam: "顶层参数",
+};
+
 function auditBadge(log: RequestLog) {
   if (!log.riskLevel || !log.auditAction) {
-    return <TinyBadge label="未审计" />;
+    return (
+      <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+        未审计
+      </span>
+    );
   }
-  const cls =
-    log.riskLevel === "clean"
-      ? "bg-success/10 text-success"
-      : "bg-danger/10 text-danger";
   return (
-    <span className={`rounded px-1.5 py-0.5 text-xs ${cls}`}>
-      {log.riskLevel === "clean" ? "Clean" : log.riskLevel} / {log.auditAction}
+    <span
+      className={`rounded px-1.5 py-0.5 text-xs ${riskStyles[log.riskLevel]}`}
+    >
+      {riskLabels[log.riskLevel]} / {actionLabels[log.auditAction]}
     </span>
+  );
+}
+
+function boolText(value: boolean): string {
+  return value ? "是" : "否";
+}
+
+function AuditReportPanel({
+  detail,
+  channelNameOf,
+}: {
+  detail: LogDetail;
+  channelNameOf: (id: string | null) => string;
+}) {
+  const report = detail.auditReport;
+  if (!report) {
+    return (
+      <section className="mt-5">
+        <h4 className="mb-2 text-sm font-semibold">风险报告</h4>
+        <p className="text-sm text-muted-foreground">此请求未启用安全审计。</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="mt-5 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-sm font-semibold">风险报告</h4>
+        <span
+          className={`rounded px-2 py-1 text-xs ${riskStyles[report.riskLevel]}`}
+        >
+          {riskLabels[report.riskLevel]} / {actionLabels[report.action]}
+        </span>
+      </div>
+
+      <dl className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        <Field k="模式" v={report.mode === "observe" ? "观察" : "拦截"} />
+        <Field k="风险分" v={String(report.riskScore)} />
+        <Field k="最终动作" v={actionLabels[report.action]} />
+        <Field k="已转发上游" v={boolText(report.upstreamForwarded)} />
+        <Field k="计划渠道" v={channelNameOf(report.plannedChannelId)} />
+        <Field k="计划模型" v={report.plannedUpstreamModel ?? "—"} />
+        <Field k="扫描截断" v={boolText(report.truncated)} />
+        <Field
+          k="扫描字节"
+          v={`${report.scannedBytes} / ${report.candidateBytes}`}
+        />
+        <Field k="扫描上限" v={String(report.scanByteLimit)} />
+        <Field
+          k="发现数"
+          v={`${report.findings.length} / ${report.totalFindings}`}
+        />
+        <Field k="发现截断" v={boolText(report.findingsTruncated)} />
+        <Field
+          k="证据级别"
+          v={report.evidenceLevel === "summary" ? "摘要" : "详细"}
+        />
+      </dl>
+
+      {!report.upstreamForwarded && (
+        <p className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          此请求已被本地安全策略拦截，未到达上游提供商。
+        </p>
+      )}
+
+      <div>
+        <h5 className="mb-2 text-sm font-semibold">审计发现</h5>
+        {report.findings.length === 0 ? (
+          <p className="text-sm text-muted-foreground">无审计发现。</p>
+        ) : (
+          <ul className="space-y-2">
+            {report.findings.map((finding, index) => (
+              <li
+                key={`${finding.ruleId}-${finding.path}-${index}`}
+                className="rounded-md border border-border p-3 text-sm"
+              >
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs">{finding.ruleId}</span>
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-xs ${riskStyles[finding.riskLevel]}`}
+                  >
+                    {riskLabels[finding.riskLevel]}
+                  </span>
+                  <TinyBadge label={finding.category} />
+                </div>
+                <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                  <Field
+                    k="建议动作"
+                    v={finding.suggestedAction || actionLabels[finding.action]}
+                  />
+                  <Field k="动作" v={actionLabels[finding.action]} />
+                  <Field k="范围" v={scopeLabels[finding.scopeKind]} />
+                  <Field k="路径" v={finding.path} mono />
+                  <Field k="置信度" v={confidenceLabels[finding.confidence]} />
+                </dl>
+                <pre className="mt-2 max-h-32 overflow-auto rounded-md border border-border bg-muted p-2 text-xs whitespace-pre-wrap">
+                  {finding.redactedExcerpt || "无摘录"}
+                </pre>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -100,6 +260,19 @@ function LogDetailModal({
       ? (detail.requestParams as Record<string, unknown>)
       : {},
   );
+  const upstreamForwarded = detail.auditReport?.upstreamForwarded !== false;
+  const routeChannel = upstreamForwarded
+    ? channelNameOf(detail.channelId)
+    : `未转发（计划 ${channelNameOf(
+        detail.auditReport?.plannedChannelId ?? detail.channelId,
+      )}）`;
+  const routeModel = upstreamForwarded
+    ? detail.upstreamModel && detail.upstreamModel !== detail.model
+      ? `${detail.model} → ${detail.upstreamModel}`
+      : detail.model
+    : `未转发（计划 ${
+        detail.auditReport?.plannedUpstreamModel ?? detail.upstreamModel ?? detail.model
+      }）`;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -124,16 +297,9 @@ function LogDetailModal({
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
           <Field k="创建时间" v={formatTime(detail.createdAt)} />
           <Field k="Trace ID" v={detail.traceId} mono />
-          <Field k="渠道" v={channelNameOf(detail.channelId)} />
+          <Field k="渠道" v={routeChannel} />
           <Field k="密钥" v={keyNameOf(detail.apiKeyId)} />
-          <Field
-            k="模型"
-            v={
-              detail.upstreamModel && detail.upstreamModel !== detail.model
-                ? `${detail.model} → ${detail.upstreamModel}`
-                : detail.model
-            }
-          />
+          <Field k="模型" v={routeModel} />
           <Field k="状态码" v={String(detail.statusCode)} />
           <Field k="耗时" v={`${detail.durationMs} ms`} />
           <Field
@@ -172,6 +338,8 @@ function LogDetailModal({
             </dd>
           </div>
         </dl>
+
+        <AuditReportPanel detail={detail} channelNameOf={channelNameOf} />
 
         {/* Conversation */}
         <section className="mt-5">

@@ -91,14 +91,29 @@ export type RiskLevel = "clean" | "info" | "low" | "medium" | "high" | "critical
 export type AuditAction = "allow" | "logOnly" | "warn" | "redact" | "confirm" | "block";
 export type AuditMode = "observe" | "enforce";
 export type AuditEvidenceLevel = "summary" | "detailed";
+export type AuditConfidence = "low" | "medium" | "high";
+export type AuditScopeKind =
+  | "messageContent"
+  | "systemMessageContent"
+  | "toolCallArguments"
+  | "toolName"
+  | "toolDescription"
+  | "toolSchemaString"
+  | "toolSchemaKey"
+  | "topLevelParam";
 
 export interface AuditFinding {
   ruleId: string;
   category: string;
   riskLevel: RiskLevel;
   action: AuditAction;
+  confidence: AuditConfidence;
+  scopeKind: AuditScopeKind;
   path: string;
-  evidence: string | null;
+  redactedExcerpt: string;
+  matchHash: string;
+  suggestedAction: string;
+  evidence?: string | null;
 }
 
 export interface AuditReport {
