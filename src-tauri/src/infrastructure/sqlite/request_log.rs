@@ -437,8 +437,11 @@ mod tests {
         log.audit_report = Some(AuditReport {
             mode: crate::domain::security_audit::AuditMode::Observe,
             risk_level: RiskLevel::Clean,
+            risk_score: 0,
             action: AuditAction::Allow,
             findings: Vec::new(),
+            total_findings: 0,
+            findings_truncated: false,
             scanned_bytes: 0,
             candidate_bytes: 0,
             scan_byte_limit: 65536,

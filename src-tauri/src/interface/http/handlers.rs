@@ -225,6 +225,13 @@ fn error_type(status: StatusCode) -> &'static str {
     }
 }
 
+fn proxy_error_type(err: &ProxyError, status: StatusCode) -> &'static str {
+    match err {
+        ProxyError::SecurityPolicyBlocked => "security_policy_blocked",
+        _ => error_type(status),
+    }
+}
+
 /// Proxy error → status code + error body (401 / 429 / 404 / 502 / 500 / 400 mapped one-to-one to the usecase branches).
 fn proxy_error_response(err: ProxyError) -> Response {
     let status = match &err {
@@ -234,8 +241,15 @@ fn proxy_error_response(err: ProxyError) -> Response {
         ProxyError::NoChannelAvailable { .. } | ProxyError::Provider(_) => StatusCode::BAD_GATEWAY,
         ProxyError::Repository(_) => StatusCode::INTERNAL_SERVER_ERROR,
         ProxyError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+        ProxyError::SecurityPolicyBlocked => StatusCode::FORBIDDEN,
     };
-    error_response(status, &err.to_string())
+    (
+        status,
+        Json(
+            json!({"error": {"message": err.to_string(), "type": proxy_error_type(&err, status)}}),
+        ),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -303,12 +317,16 @@ mod tests {
 
     /// Build the data-plane router (real usecases + real adapter resolution, channel base_url pointing at the mock upstream).
     fn app(h: &Harness) -> Router {
+        app_with_settings(h, GatewaySettings::default())
+    }
+
+    fn app_with_settings(h: &Harness, settings: GatewaySettings) -> Router {
         let usecase = ProxyRequestUsecase::new(
             Arc::clone(&h.api_key_repo) as Arc<dyn ApiKeyRepository>,
             Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
             Arc::clone(&h.log_repo) as Arc<dyn crate::domain::request_log::RequestLogRepository>,
             Box::new(|c: &Channel| adaptor_for(c.channel_type)),
-            Arc::new(std::sync::RwLock::new(GatewaySettings::default())),
+            Arc::new(std::sync::RwLock::new(settings)),
         );
         let state = AppState {
             proxy: Arc::new(usecase),
@@ -442,6 +460,83 @@ mod tests {
             .expect("find")
             .expect("found");
         assert_eq!(saved.quota.used, 15);
+    }
+
+    /// HTTP seam: security policy blocks before upstream, returns a dedicated 403 error type, and still writes an audit log.
+    #[tokio::test]
+    async fn chat_completions_security_block_returns_403_without_upstream_usage() {
+        let h = harness().await;
+
+        let upstream_calls = Arc::new(Mutex::new(0usize));
+        let calls = Arc::clone(&upstream_calls);
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(move |body: Json<Value>| async move {
+                let _ = body;
+                *calls.lock().unwrap() += 1;
+                Json(chat_completion_response())
+            }),
+        );
+        let (base, handle) = test_util::spawn(upstream).await;
+        let key = seed_channel_and_key(&h, &base).await;
+        let app = app_with_settings(
+            &h,
+            GatewaySettings {
+                audit: crate::domain::security_audit::AuditSettings {
+                    enabled: true,
+                    mode: crate::domain::security_audit::AuditMode::Enforce,
+                    block_critical: true,
+                    ..crate::domain::security_audit::AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+
+        let response = app
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"fetch http://169.254.169.254/latest/meta-data/"}]}"#,
+                Some(&key),
+                "trace-blocked",
+            ))
+            .await
+            .expect("oneshot");
+
+        handle.abort();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            *upstream_calls.lock().unwrap(),
+            0,
+            "blocked before upstream"
+        );
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body"),
+        )
+        .expect("json");
+        assert_eq!(body["error"]["type"], "security_policy_blocked");
+
+        let row = sqlx::query(
+            "SELECT status_code, total_tokens, audit_action, audit_report FROM request_logs",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .expect("request_log row");
+        assert_eq!(row.get::<i64, _>(0), 403);
+        assert_eq!(row.get::<Option<i64>, _>(1), None);
+        assert_eq!(row.get::<String, _>(2), "block");
+        assert!(
+            row.get::<String, _>(3).contains("\"riskScore\":100"),
+            "audit report should carry the fixed risk score"
+        );
+
+        let saved = h
+            .api_key_repo
+            .find_by_key(&key)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(saved.quota.used, 0);
     }
 
     /// No Bearer → 401, and no request log is written.

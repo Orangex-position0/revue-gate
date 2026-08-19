@@ -27,7 +27,7 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
-use crate::domain::security_audit::{AuditPolicy, AuditReport, build_audit_scope};
+use crate::domain::security_audit::{AuditAction, AuditPolicy, AuditReport, build_audit_scope};
 use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
@@ -53,6 +53,8 @@ pub enum ProxyError {
     },
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("blocked by security policy")]
+    SecurityPolicyBlocked,
     #[error("repository error: {0}")]
     Repository(#[from] RepositoryError),
     #[error("provider error: {0}")]
@@ -183,6 +185,29 @@ impl ProxyRequestUsecase {
         }
         .min(candidates.len());
 
+        let first_upstream_model = apply_mapping(&candidates[0], model);
+        let audit_report = audit_policy.enabled.then(|| {
+            let audit_scope = build_audit_scope(&request.body, &audit_policy);
+            AuditReport::for_scope(&audit_policy, &audit_scope)
+        });
+        if audit_report
+            .as_ref()
+            .is_some_and(|report| report.action == AuditAction::Block)
+        {
+            let ctx = AttemptContext {
+                request,
+                api_key,
+                channel: candidates[0].clone(),
+                upstream_model: first_upstream_model,
+                is_retry: false,
+                store_payload: audit_policy.store_payload,
+                audit_report,
+                started: Instant::now(),
+            };
+            record_policy_blocked(self.log_repo.as_ref(), &ctx).await;
+            return Err(ProxyError::SecurityPolicyBlocked);
+        }
+
         // 3) Try candidates one by one: return on success; on failure log and try the next (not exceeding max_attempts).
         let mut attempts = 0usize;
         let mut last_status: Option<u16> = None;
@@ -205,7 +230,8 @@ impl ProxyRequestUsecase {
                 channel: channel.clone(),
                 upstream_model: upstream_model.clone(),
                 is_retry: attempts > 1,
-                audit_policy: audit_policy.clone(),
+                store_payload: audit_policy.store_payload,
+                audit_report: audit_report.clone(),
                 started: Instant::now(),
             };
 
@@ -312,7 +338,8 @@ struct AttemptContext {
     channel: Channel,
     upstream_model: String,
     is_retry: bool,
-    audit_policy: AuditPolicy,
+    store_payload: bool,
+    audit_report: Option<AuditReport>,
     started: Instant,
 }
 
@@ -350,6 +377,19 @@ async fn record_failure(
     }
 }
 
+/// Policy block path: no upstream call and no provider usage, but keep a local audit log.
+async fn record_policy_blocked(log_repo: &dyn RequestLogRepository, ctx: &AttemptContext) {
+    let log = build_log(
+        ctx,
+        403,
+        None,
+        Some("blocked by security policy".to_string()),
+    );
+    if let Err(e) = log_repo.save(&log).await {
+        tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write blocked request log");
+    }
+}
+
 /// Build a request log (token fields narrowed from u64 usage to u32).
 fn build_log(
     ctx: &AttemptContext,
@@ -357,13 +397,7 @@ fn build_log(
     usage: Option<Usage>,
     error_message: Option<String>,
 ) -> RequestLog {
-    let audit_scope = ctx
-        .audit_policy
-        .enabled
-        .then(|| build_audit_scope(&ctx.request.body, &ctx.audit_policy));
-    let audit_report = audit_scope
-        .as_ref()
-        .map(|scope| AuditReport::for_scope(&ctx.audit_policy, scope));
+    let audit_report = ctx.audit_report.clone();
     RequestLog {
         id: Uuid::now_v7(),
         api_key_id: Some(ctx.api_key.id),
@@ -379,10 +413,7 @@ fn build_log(
         is_stream: ctx.request.stream,
         is_retry: ctx.is_retry,
         trace_id: ctx.request.trace_id.clone(),
-        request_body: ctx
-            .audit_policy
-            .store_payload
-            .then(|| ctx.request.body.to_string()),
+        request_body: ctx.store_payload.then(|| ctx.request.body.to_string()),
         risk_level: audit_report.as_ref().map(|report| report.risk_level),
         audit_action: audit_report.as_ref().map(|report| report.action),
         audit_report,
@@ -476,7 +507,7 @@ mod tests {
     use super::*;
     use crate::domain::channel::ModelMapping;
     use crate::domain::provider::Usage;
-    use crate::domain::security_audit::{AuditAction, AuditSettings, RiskLevel};
+    use crate::domain::security_audit::{AuditAction, AuditMode, AuditSettings, RiskLevel};
     use crate::domain::settings::RetryPolicy;
     use crate::test_support::{
         InMemoryApiKeyRepository, InMemoryChannelRepository, InMemoryRequestLogRepository,
@@ -760,10 +791,10 @@ mod tests {
 
         let log = all_request_logs(&*logs).await.pop().expect("log");
         assert_eq!(log.risk_level, Some(RiskLevel::Critical));
-        assert_eq!(log.audit_action, Some(AuditAction::Block));
+        assert_eq!(log.audit_action, Some(AuditAction::Warn));
         let report = log.audit_report.as_ref().expect("audit report");
         assert_eq!(report.risk_level, RiskLevel::Critical);
-        assert_eq!(report.action, AuditAction::Block);
+        assert_eq!(report.action, AuditAction::Warn);
         assert!(report.findings.iter().any(|finding| {
             finding.category == "ToolRisk" && finding.rule_id == "tool.downloadExecute"
         }));
@@ -829,10 +860,65 @@ mod tests {
 
         let log = all_request_logs(&*logs).await.pop().expect("log");
         assert_eq!(log.risk_level, Some(RiskLevel::Critical));
-        assert_eq!(log.audit_action, Some(AuditAction::Block));
+        assert_eq!(log.audit_action, Some(AuditAction::Warn));
         let report = log.audit_report.as_ref().expect("audit report");
         assert_eq!(report.risk_level, RiskLevel::Critical);
+        assert_eq!(report.action, AuditAction::Warn);
+    }
+
+    /// Enforce mode blocks critical block candidates before any upstream call or usage billing, while still writing an audit log.
+    #[tokio::test]
+    async fn audit_enforce_blocks_critical_without_forwarding_or_usage() {
+        let recorder = Arc::new(Mutex::new(Vec::new()));
+        let value = Arc::clone(&recorder);
+        let adaptor = move |_: &Channel| -> Box<dyn ProviderAdaptor> {
+            Box::new(MockForwardAdaptor::with_recorder(
+                Arc::clone(&value),
+                Ok(ok_response(200, Some(usage(10, 5, 15)))),
+                Ok(vec![]),
+            ))
+        };
+        let (uc, keys, channels, logs) = harness_with_settings(
+            adaptor,
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    mode: AuditMode::Enforce,
+                    block_critical: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        let channel = save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": "fetch http://169.254.169.254/latest/meta-data/"
+            }],
+        });
+
+        let err = uc.execute(req).await.expect_err("blocked");
+
+        assert!(matches!(err, ProxyError::SecurityPolicyBlocked));
+        assert_eq!(recorder.lock().unwrap().len(), 0, "blocked before forward");
+        let saved = keys.find_by_id(key.id).await.expect("find").expect("found");
+        assert_eq!(saved.quota.used, 0, "blocked request does not bill usage");
+
+        let log = all_request_logs(&*logs).await.pop().expect("blocked log");
+        assert_eq!(log.channel_id, Some(channel.id));
+        assert_eq!(log.upstream_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(log.status_code, 403);
+        assert_eq!(log.total_tokens, None);
+        assert_eq!(log.risk_level, Some(RiskLevel::Critical));
+        assert_eq!(log.audit_action, Some(AuditAction::Block));
+        let report = log.audit_report.as_ref().expect("audit report");
         assert_eq!(report.action, AuditAction::Block);
+        assert_eq!(report.risk_score, 100);
     }
 
     /// Model mapping: the requested client_model maps to upstream_model, and body["model"] is rewritten accordingly.

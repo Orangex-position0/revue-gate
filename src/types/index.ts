@@ -87,7 +87,7 @@ export interface LogQuery {
 }
 
 /** Security audit projection types: aligned with the backend security_audit domain module. */
-export type RiskLevel = "clean" | "low" | "medium" | "high" | "critical";
+export type RiskLevel = "clean" | "info" | "low" | "medium" | "high" | "critical";
 export type AuditAction = "allow" | "logOnly" | "warn" | "redact" | "confirm" | "block";
 export type AuditMode = "observe" | "enforce";
 export type AuditEvidenceLevel = "summary" | "detailed";
@@ -104,8 +104,11 @@ export interface AuditFinding {
 export interface AuditReport {
   mode: AuditMode;
   riskLevel: RiskLevel;
+  riskScore: number;
   action: AuditAction;
   findings: AuditFinding[];
+  totalFindings: number;
+  findingsTruncated: boolean;
   scannedBytes: number;
   candidateBytes: number;
   scanByteLimit: number;
