@@ -176,6 +176,9 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+    use crate::domain::security_audit::{
+        AuditAction, AuditEvidenceLevel, AuditMode, AuditPolicy, AuditReport, RiskLevel,
+    };
     use crate::test_support::{InMemoryRequestLogRepository, all_request_logs, sample_request_log};
 
     /// Build a sample request body with messages / params / tools.
@@ -278,6 +281,53 @@ mod tests {
         assert!(detail.tool_names.is_empty());
         assert_eq!(detail.request_params, Value::Null);
         assert_eq!(detail.log.status_code, 200);
+    }
+
+    /// Audit summary display data is carried by the log itself; request_body only controls the optional
+    /// conversation/params views used by the detail modal.
+    #[tokio::test]
+    async fn get_log_detail_preserves_audit_report_with_and_without_request_body() {
+        let repo = InMemoryRequestLogRepository::new();
+        let audit_report = AuditReport::clean(&AuditPolicy {
+            enabled: true,
+            mode: AuditMode::Observe,
+            block_critical: true,
+            scan_system_messages: false,
+            scan_byte_limit: 64 * 1024,
+            store_payload: false,
+            evidence_level: AuditEvidenceLevel::Summary,
+        });
+
+        let mut with_body = sample_request_log();
+        with_body.request_body = Some(sample_body());
+        with_body.risk_level = Some(RiskLevel::Clean);
+        with_body.audit_action = Some(AuditAction::Allow);
+        with_body.audit_report = Some(audit_report.clone());
+        repo.save(&with_body).await.expect("save with body");
+
+        let mut without_body = sample_request_log();
+        without_body.risk_level = Some(RiskLevel::Clean);
+        without_body.audit_action = Some(AuditAction::Allow);
+        without_body.audit_report = Some(audit_report.clone());
+        repo.save(&without_body).await.expect("save without body");
+
+        let detail_with_body = GetLogDetailUsecase
+            .execute(&repo, with_body.id)
+            .await
+            .expect("detail with body");
+        assert!(!detail_with_body.conversation.is_empty());
+        assert_eq!(
+            detail_with_body.log.audit_report,
+            Some(audit_report.clone())
+        );
+
+        let detail_without_body = GetLogDetailUsecase
+            .execute(&repo, without_body.id)
+            .await
+            .expect("detail without body");
+        assert!(detail_without_body.conversation.is_empty());
+        assert_eq!(detail_without_body.request_params, Value::Null);
+        assert_eq!(detail_without_body.log.audit_report, Some(audit_report));
     }
 
     /// Invalid JSON body: treated as having no structured view, no error (the raw JSON is still in log.request_body).

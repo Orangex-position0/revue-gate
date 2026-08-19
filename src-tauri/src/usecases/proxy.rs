@@ -772,6 +772,41 @@ mod tests {
         assert!(report.findings.iter().any(|f| f.rule_id == "pii.email"));
     }
 
+    /// Low-risk findings are log-only at the usecase seam: they annotate the log but still forward normally.
+    #[tokio::test]
+    async fn audit_low_risk_findings_record_log_only_report() {
+        let (uc, keys, channels, logs) = harness_with_settings(
+            single_ok_adaptor(ok_response(200, None)),
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{"role": "user", "content": "mail alice@acme.co"}],
+        });
+
+        let result = uc.execute(req).await.expect("forward still succeeds");
+        assert!(matches!(result, ProxySuccess::NonStream(_)));
+
+        let log = all_request_logs(&*logs).await.pop().expect("log");
+        assert_eq!(log.risk_level, Some(RiskLevel::Low));
+        assert_eq!(log.audit_action, Some(AuditAction::LogOnly));
+        let report = log.audit_report.as_ref().expect("audit report");
+        assert_eq!(report.risk_level, RiskLevel::Low);
+        assert_eq!(report.action, AuditAction::LogOnly);
+        assert!(report.findings.iter().any(|f| f.rule_id == "pii.email"));
+    }
+
     /// Audit findings are reflected in both the structured report and the top-level log projection.
     #[tokio::test]
     async fn audit_enabled_success_records_detected_risk_report() {

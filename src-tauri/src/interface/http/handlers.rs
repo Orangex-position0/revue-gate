@@ -359,6 +359,19 @@ mod tests {
             .expect("build request")
     }
 
+    async fn error_type(response: Response) -> String {
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read body"),
+        )
+        .expect("json");
+        body["error"]["type"]
+            .as_str()
+            .expect("error type")
+            .to_string()
+    }
+
     /// MakeWriter that captures the fmt subscriber output into a shared buffer (structured-log test harness).
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -537,6 +550,125 @@ mod tests {
             .expect("find")
             .expect("found");
         assert_eq!(saved.quota.used, 0);
+    }
+
+    /// HTTP seam: security-policy blocks have a dedicated error type and remain distinct from auth, quota,
+    /// malformed request, no-candidate routing, and upstream failure responses.
+    #[tokio::test]
+    async fn chat_completions_error_types_distinguish_security_block_from_other_failures() {
+        let h = harness().await;
+        let upstream = Router::new().route(
+            "/chat/completions",
+            post(|| async move {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "upstream failed"})),
+                )
+            }),
+        );
+        let (base, handle) = test_util::spawn(upstream).await;
+        let key = seed_channel_and_key(&h, &base).await;
+
+        let blocked_app = app_with_settings(
+            &h,
+            GatewaySettings {
+                audit: crate::domain::security_audit::AuditSettings {
+                    enabled: true,
+                    mode: crate::domain::security_audit::AuditMode::Enforce,
+                    block_critical: true,
+                    ..crate::domain::security_audit::AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let blocked = blocked_app
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"fetch http://169.254.169.254/latest/meta-data/"}]}"#,
+                Some(&key),
+                "trace-error-type-blocked",
+            ))
+            .await
+            .expect("blocked response");
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+        assert_eq!(error_type(blocked).await, "security_policy_blocked");
+
+        let missing_bearer = app(&h)
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","messages":[]}"#,
+                None,
+                "trace-error-type-auth",
+            ))
+            .await
+            .expect("auth response");
+        assert_eq!(missing_bearer.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(error_type(missing_bearer).await, "authentication_error");
+
+        let mut exhausted = h
+            .api_key_repo
+            .find_by_key(&key)
+            .await
+            .expect("find")
+            .expect("found");
+        exhausted.quota = Quota {
+            limit: Some(0),
+            used: 0,
+        };
+        h.api_key_repo
+            .save(&exhausted)
+            .await
+            .expect("save exhausted key");
+        let quota = app(&h)
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","messages":[]}"#,
+                Some(&key),
+                "trace-error-type-quota",
+            ))
+            .await
+            .expect("quota response");
+        assert_eq!(quota.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_type(quota).await, "rate_limit_error");
+
+        exhausted.quota = Quota {
+            limit: Some(100),
+            used: 0,
+        };
+        h.api_key_repo
+            .save(&exhausted)
+            .await
+            .expect("restore key quota");
+        let invalid = app(&h)
+            .oneshot(post_chat(
+                "not-json",
+                Some(&key),
+                "trace-error-type-invalid",
+            ))
+            .await
+            .expect("invalid response");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(invalid).await, "invalid_request_error");
+
+        let no_candidate = app(&h)
+            .oneshot(post_chat(
+                r#"{"model":"claude-3","messages":[]}"#,
+                Some(&key),
+                "trace-error-type-no-candidate",
+            ))
+            .await
+            .expect("no candidate response");
+        assert_eq!(no_candidate.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_type(no_candidate).await, "not_found_error");
+
+        let upstream_failure = app(&h)
+            .oneshot(post_chat(
+                r#"{"model":"gpt-4o","messages":[]}"#,
+                Some(&key),
+                "trace-error-type-upstream",
+            ))
+            .await
+            .expect("upstream failure response");
+        handle.abort();
+        assert_eq!(upstream_failure.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error_type(upstream_failure).await, "api_error");
     }
 
     /// No Bearer → 401, and no request log is written.
