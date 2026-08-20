@@ -14,8 +14,9 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
-use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
+use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
 use crate::domain::security_audit::{AuditAction, AuditReport, RiskLevel};
+use crate::domain::stats::LogStatRow;
 
 /// Row mapping for the request log table: one-to-one with the current request_logs schema.
 /// INTEGER columns are read as i64, then converted to the domain layer's narrow types via `TryFrom`.
@@ -45,6 +46,8 @@ struct RequestLogDb {
 /// Row mapping for the stats projection: only the columns needed for aggregation (no request_body, see `LogStatRow`).
 #[derive(FromRow)]
 struct StatRowDb {
+    channel_id: Option<String>,
+    model: String,
     status_code: i64,
     total_tokens: Option<i64>,
     duration_ms: i64,
@@ -190,7 +193,7 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         end_at: Option<DateTime<Utc>>,
     ) -> Result<Vec<LogStatRow>, RepositoryError> {
         let mut sql = String::from(
-            "SELECT status_code, total_tokens, duration_ms, created_at FROM request_logs",
+            "SELECT channel_id, model, status_code, total_tokens, duration_ms, created_at FROM request_logs",
         );
         let mut binds: Vec<String> = Vec::new();
         let mut clauses: Vec<&str> = Vec::new();
@@ -377,6 +380,13 @@ impl TryFrom<StatRowDb> for LogStatRow {
 
     fn try_from(row: StatRowDb) -> Result<Self, Self::Error> {
         Ok(LogStatRow {
+            channel_id: row
+                .channel_id
+                .as_deref()
+                .map(Uuid::from_str)
+                .transpose()
+                .map_err(|e| bad_row(&format!("invalid channel_id: {e}")))?,
+            model: row.model,
             status_code: narrow("status_code", row.status_code)?,
             total_tokens: row
                 .total_tokens
@@ -899,6 +909,8 @@ mod tests {
             .expect("stat rows");
         assert_eq!(rows.len(), 2, "下界含、上界不含");
         let row = rows.iter().find(|r| r.status_code == 502).expect("in row");
+        assert_eq!(row.channel_id, in_range.channel_id);
+        assert_eq!(row.model, in_range.model);
         assert_eq!(row.total_tokens, Some(99));
         assert_eq!(row.duration_ms, 1234);
         assert_eq!(row.created_at, utc("2026-01-15T12:00:00Z"));

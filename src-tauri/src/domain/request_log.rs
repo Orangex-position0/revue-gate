@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
 use crate::domain::security_audit::{AuditAction, AuditReport, RiskLevel};
+use crate::domain::stats::LogStatRow;
 
 /// RequestLog entity: the complete audit record of one request.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -137,20 +138,6 @@ pub struct LogPage {
     pub items: Vec<RequestLog>,
     /// Total number of logs matching the filter (independent of the current page).
     pub total: u64,
-}
-
-/// Stat projection row: lightweight columns for dashboard aggregation (no request_body, to avoid pulling large fields back in stats scans).
-/// `stat_rows` returns this type; aggregation logic lives in usecases/stats.rs (pure Rust, single code path,
-/// so sqlx and in-memory implementations agree on data, see Spec §Testing seam A).
-#[derive(Debug, Clone, PartialEq)]
-pub struct LogStatRow {
-    /// HTTP status code returned to the client (<400 counts as success, used for channel availability).
-    pub status_code: u16,
-    /// Total tokens for this request (backfilled after streaming parse; None when not parsed, counted as 0).
-    pub total_tokens: Option<u32>,
-    /// Total request duration (milliseconds).
-    pub duration_ms: u64,
-    pub created_at: DateTime<Utc>,
 }
 
 /// RequestLog repository trait: interface defined in the domain layer, sqlx implementation provided by infrastructure.

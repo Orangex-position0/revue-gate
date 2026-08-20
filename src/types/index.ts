@@ -205,6 +205,21 @@ export interface StatsSnapshot {
   trend: DailyStat[];
 }
 
+export interface RankRow {
+  key: string;
+  name: string;
+  requests: number;
+  tokens: number;
+  avgLatencyMs: number;
+  availability: number;
+}
+
+export interface UsageStats {
+  daily: DailyStat[];
+  byChannel: RankRow[];
+  byModel: RankRow[];
+}
+
 /** UI theme tri-state: serialized lowercase, consistent with the backend Theme enum. */
 export type Theme = "light" | "dark" | "system";
 

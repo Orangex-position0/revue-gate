@@ -6,11 +6,19 @@
 //! day boundaries are determined by `timezone_offset_minutes` (JS `Date.getTimezoneOffset()` semantics, positive = west),
 //! and timezone conversion lives only in this use case layer, never in SQL index conditions (see the date-handling rules).
 
-use chrono::{DateTime, Days, FixedOffset, NaiveDate, Utc};
-use serde::Serialize;
+use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::domain::channel::ChannelRepository;
 use crate::domain::error::RepositoryError;
-use crate::domain::request_log::{LogStatRow, RequestLogRepository};
+use crate::domain::request_log::RequestLogRepository;
+use crate::domain::stats::{
+    DailyStat, StatsAggregationError, UsageStats, UsageStatsQuery, aggregate_dashboard,
+    aggregate_usage,
+};
 
 /// Stats query input.
 #[derive(Debug, Clone, Copy)]
@@ -24,20 +32,21 @@ pub struct StatsQuery {
 pub enum StatsError {
     #[error("invalid timezone offset: {0}")]
     InvalidTimezoneOffset(i32),
+    #[error("invalid time range")]
+    InvalidTimeRange,
     #[error("request log repository error: {0}")]
     Repository(#[from] RepositoryError),
 }
 
-/// Daily stat: one point of the 7-day trend line (date is the local-timezone date).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DailyStat {
-    /// Local date (YYYY-MM-DD).
-    pub date: NaiveDate,
-    /// Requests on that day.
-    pub requests: u64,
-    /// Total tokens that day (requests without usage count as 0).
-    pub tokens: u64,
+impl From<StatsAggregationError> for StatsError {
+    fn from(value: StatsAggregationError) -> Self {
+        match value {
+            StatsAggregationError::InvalidTimezoneOffset(offset) => {
+                StatsError::InvalidTimezoneOffset(offset)
+            }
+            StatsAggregationError::InvalidTimeRange => StatsError::InvalidTimeRange,
+        }
+    }
 }
 
 /// Dashboard stats snapshot: card metrics + 7-day trend (consistent with request log data).
@@ -69,109 +78,50 @@ impl GetStatsUsecase {
         query: StatsQuery,
         now: DateTime<Utc>,
     ) -> Result<StatsSnapshot, StatsError> {
-        // JS getTimezoneOffset semantics: positive = west, negative = east → east_opt(-minutes*60).
-        // checked guards against i32::MIN negation overflow (the JS range is about ±840 minutes; this only prevents a debug panic from abnormal input).
-        let east_seconds = query
-            .timezone_offset_minutes
-            .checked_neg()
-            .and_then(|m| m.checked_mul(60))
-            .ok_or(StatsError::InvalidTimezoneOffset(
-                query.timezone_offset_minutes,
-            ))?;
-        let tz = FixedOffset::east_opt(east_seconds).ok_or(StatsError::InvalidTimezoneOffset(
-            query.timezone_offset_minutes,
-        ))?;
-        let today = now.with_timezone(&tz).date_naive();
-
         // One full lightweight scan (no request_body); today / cumulative / average / availability / trend are all derived here.
         let rows = repo.stat_rows(None, None).await?;
-
-        let total_requests = rows.len() as u64;
-        let total_tokens = sum_tokens(&rows);
-        let avg_latency_ms = if rows.is_empty() {
-            0.0
-        } else {
-            rows.iter().map(|r| r.duration_ms as f64).sum::<f64>() / rows.len() as f64
-        };
-        let success = rows.iter().filter(|r| r.status_code < 400).count() as u64;
-        let channel_availability = if total_requests == 0 {
-            0.0
-        } else {
-            success as f64 / total_requests as f64
-        };
-
-        // Today's window [today 00:00, tomorrow 00:00) (local day boundary converted to UTC).
-        let today_start = day_start_utc(today, tz);
-        let today_end = day_start_utc(today + Days::new(1), tz);
-        let today_rows: Vec<&LogStatRow> = rows
-            .iter()
-            .filter(|r| r.created_at >= today_start && r.created_at < today_end)
-            .collect();
-        let today_requests = today_rows.len() as u64;
-        let today_tokens = sum_tokens_of(&today_rows);
-
-        // 7-day trend: today-6 ..= today, grouped by local day boundary (oldest → newest).
-        let mut trend = Vec::with_capacity(7);
-        for i in (0..7).rev() {
-            let day = today - Days::new(i);
-            let start = day_start_utc(day, tz);
-            let end = day_start_utc(day + Days::new(1), tz);
-            let day_rows: Vec<&LogStatRow> = rows
-                .iter()
-                .filter(|r| r.created_at >= start && r.created_at < end)
-                .collect();
-            trend.push(DailyStat {
-                date: day,
-                requests: day_rows.len() as u64,
-                tokens: sum_tokens_of(&day_rows),
-            });
-        }
+        let stats = aggregate_dashboard(&rows, query.timezone_offset_minutes, now)?;
 
         Ok(StatsSnapshot {
-            today_requests,
-            today_tokens,
-            total_requests,
-            total_tokens,
-            avg_latency_ms,
-            channel_availability,
-            trend,
+            today_requests: stats.today_requests,
+            today_tokens: stats.today_tokens,
+            total_requests: stats.total_requests,
+            total_tokens: stats.total_tokens,
+            avg_latency_ms: stats.avg_latency_ms,
+            channel_availability: stats.channel_availability,
+            trend: stats.trend,
         })
     }
 }
 
-/// Convert local midnight of a day to UTC. FixedOffset has no DST jumps, so `single` always succeeds
-/// (the offset is captured by the frontend at "now"; if the window crosses a DST switch, the current offset is used as an approximation — today's bucket
-/// matches the LogsPage today filter; historical buckets may deviate across DST, an acceptable approximation).
-fn day_start_utc(day: NaiveDate, tz: FixedOffset) -> DateTime<Utc> {
-    day.and_hms_opt(0, 0, 0)
-        .expect("midnight is a valid time")
-        .and_local_timezone(tz)
-        .single()
-        .expect("fixed offset has no ambiguous local times")
-        .with_timezone(&Utc)
-}
-
-/// Sum tokens: requests without usage count as 0.
-fn sum_tokens(rows: &[LogStatRow]) -> u64 {
-    rows.iter()
-        .map(|r| r.total_tokens.unwrap_or(0) as u64)
-        .sum()
-}
-
-/// Token sum over a slice of references (avoids cloning rows).
-fn sum_tokens_of(rows: &[&LogStatRow]) -> u64 {
-    rows.iter()
-        .map(|r| r.total_tokens.unwrap_or(0) as u64)
-        .sum()
+pub struct GetUsageStatsUsecase;
+impl GetUsageStatsUsecase {
+    pub async fn execute(
+        &self,
+        log_repo: &dyn RequestLogRepository,
+        channel_repo: &dyn ChannelRepository,
+        query: UsageStatsQuery,
+    ) -> Result<UsageStats, StatsError> {
+        let rows = log_repo
+            .stat_rows(Some(query.start_at), Some(query.end_at))
+            .await?;
+        let channels = channel_repo.list().await?;
+        let channel_names: HashMap<Uuid, String> =
+            channels.into_iter().map(|c| (c.id, c.name)).collect();
+        Ok(aggregate_usage(&rows, query, &channel_names)?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use chrono::{Days, FixedOffset, NaiveDate};
 
     use super::*;
     use crate::domain::request_log::RequestLog;
-    use crate::test_support::{InMemoryRequestLogRepository, sample_request_log};
+    use crate::domain::stats::{LogStatRow, day_start_utc};
+    use crate::test_support::{
+        InMemoryChannelRepository, InMemoryRequestLogRepository, sample_channel, sample_request_log,
+    };
 
     fn utc(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s)
@@ -376,19 +326,23 @@ mod tests {
 
         // Independent check: filter all logs directly by the today window (consistent with the stats under UTC).
         let logs = repo.stat_rows(None, None).await.expect("stat rows");
-        let today_start = now
+        let today = now
             .with_timezone(&FixedOffset::east_opt(0).expect("utc"))
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .expect("midnight")
-            .and_utc();
+            .date_naive();
+        let today_start = day_start_utc(today, FixedOffset::east_opt(0).expect("utc"));
         let today_end = today_start + Days::new(1);
         let today_rows: Vec<&LogStatRow> = logs
             .iter()
             .filter(|r| r.created_at >= today_start && r.created_at < today_end)
             .collect();
         assert_eq!(stats.today_requests as usize, today_rows.len());
-        assert_eq!(stats.today_tokens, sum_tokens_of(&today_rows));
+        assert_eq!(
+            stats.today_tokens,
+            today_rows
+                .iter()
+                .map(|r| r.total_tokens.unwrap_or(0) as u64)
+                .sum::<u64>()
+        );
     }
 
     /// Invalid timezone offset: returns InvalidTimezoneOffset, no panic.
@@ -405,5 +359,49 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(StatsError::InvalidTimezoneOffset(_))));
+    }
+
+    #[tokio::test]
+    async fn usage_stats_reads_one_range_and_returns_coherent_views() {
+        let log_repo = InMemoryRequestLogRepository::new();
+        let channel_repo = InMemoryChannelRepository::new();
+        let channel = sample_channel();
+        channel_repo.save(&channel).await.expect("save channel");
+
+        let mut a = log_at(utc("2026-08-01T10:00:00Z"), Some(10), 200, 100);
+        a.channel_id = Some(channel.id);
+        a.model = "gpt-4o".to_string();
+        log_repo.save(&a).await.expect("save a");
+
+        let mut b = log_at(utc("2026-08-02T10:00:00Z"), Some(20), 500, 300);
+        b.channel_id = Some(channel.id);
+        b.model = "gpt-4o".to_string();
+        log_repo.save(&b).await.expect("save b");
+
+        let mut c = log_at(utc("2026-08-03T10:00:00Z"), Some(99), 200, 100);
+        c.model = "outside".to_string();
+        log_repo.save(&c).await.expect("save c");
+
+        let stats = GetUsageStatsUsecase
+            .execute(
+                &log_repo,
+                &channel_repo,
+                UsageStatsQuery {
+                    start_at: utc("2026-08-01T00:00:00Z"),
+                    end_at: utc("2026-08-03T00:00:00Z"),
+                    timezone_offset_minutes: 0,
+                },
+            )
+            .await
+            .expect("usage stats");
+
+        assert_eq!(stats.daily.len(), 2);
+        assert_eq!(stats.daily.iter().map(|d| d.tokens).sum::<u64>(), 30);
+        assert_eq!(stats.by_channel[0].key, channel.id.to_string());
+        assert_eq!(stats.by_channel[0].name, channel.name);
+        assert_eq!(stats.by_channel[0].tokens, 30);
+        assert!((stats.by_channel[0].availability - 0.5).abs() < 1e-9);
+        assert_eq!(stats.by_model[0].key, "gpt-4o");
+        assert_eq!(stats.by_model[0].tokens, 30);
     }
 }

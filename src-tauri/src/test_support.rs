@@ -16,8 +16,9 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
     TestResult,
 };
-use crate::domain::request_log::{LogPage, LogQuery, LogStatRow, RequestLog, RequestLogRepository};
+use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
 use crate::domain::settings::{GatewaySettings, SettingsRepository};
+use crate::domain::stats::LogStatRow;
 
 /// Build a minimal Channel test sample (reused across layers).
 pub(crate) fn sample_channel() -> Channel {
@@ -272,6 +273,8 @@ impl RequestLogRepository for InMemoryRequestLogRepository {
                     && end_at.is_none_or(|e| l.created_at < e)
             })
             .map(|l| LogStatRow {
+                channel_id: l.channel_id,
+                model: l.model.clone(),
                 status_code: l.status_code,
                 total_tokens: l.total_tokens,
                 duration_ms: l.duration_ms,

@@ -12,6 +12,7 @@ import type {
   LogQuery,
   ServerStatus,
   StatsSnapshot,
+  UsageStats,
 } from "@/types";
 
 /** Unified error conversion: Tauri Commands return Result<T, String>; invoke rejection values may be String / Error. */
@@ -88,4 +89,10 @@ export const statsApi = {
    *  timezoneOffsetMinutes is the frontend local timezone offset (JS `Date.getTimezoneOffset()`: positive west, negative east). */
   get: (timezoneOffsetMinutes: number) =>
     invoke<StatsSnapshot>("get_stats", { timezoneOffsetMinutes }),
+  usage: (startAt: string, endAt: string, timezoneOffsetMinutes: number) =>
+    invoke<UsageStats>("usage_stats", {
+      startAt,
+      endAt,
+      timezoneOffsetMinutes,
+    }),
 };

@@ -27,7 +27,7 @@ use interface::commands::server::{
     get_server_status, resolve_host_port, start_gateway, start_server, stop_gateway, stop_server,
 };
 use interface::commands::settings::{apply_autostart, get_settings, save_settings};
-use interface::commands::stats::get_stats;
+use interface::commands::stats::{get_stats, usage_stats};
 use interface::http::handlers::AppState;
 use interface::http::server::ServerManager;
 use tauri::menu::{Menu, MenuItem};
@@ -140,7 +140,8 @@ pub fn run() {
             get_log_detail,
             delete_logs_before,
             clear_logs,
-            get_stats
+            get_stats,
+            usage_stats
         ])
         // Window events: close-to-tray / minimize-to-tray. Events fire only after setup completes,
         // when the shared settings state is registered (try_state as a fallback to avoid a pre-setup panic).

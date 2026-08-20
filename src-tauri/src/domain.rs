@@ -12,3 +12,4 @@ pub mod quota;
 pub mod request_log;
 pub mod security_audit;
 pub mod settings;
+pub mod stats;
