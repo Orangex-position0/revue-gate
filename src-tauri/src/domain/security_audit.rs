@@ -891,6 +891,14 @@ fn detector_rules(policy: &AuditPolicy) -> Vec<DetectorRule> {
             confidence: AuditConfidence::High,
             suggested_action: "Review webhook or tunnel endpoints before forwarding.",
         },
+        DetectorRule {
+            id: "network.ipProbeHost",
+            category: CATEGORY_NETWORK_RISK,
+            risk_level: RiskLevel::High,
+            action: AuditAction::Warn,
+            confidence: AuditConfidence::High,
+            suggested_action: "Review public IP discovery endpoints before forwarding.",
+        },
     ]
 }
 
@@ -932,6 +940,7 @@ fn find_rule_matches(rule_id: &str, text: &str) -> Vec<MatchSpan> {
         "network.privateLiteral" => find_private_network_literals(text, false),
         "network.metadataIp" => find_private_network_literals(text, true),
         "network.webhookOrTunnelHost" => find_webhook_or_tunnel_hosts(text),
+        "network.ipProbeHost" => find_ip_probe_hosts(text),
         _ => Vec::new(),
     }
 }
@@ -960,14 +969,27 @@ fn find_private_key_blocks(text: &str) -> Vec<MatchSpan> {
 }
 
 fn find_provider_api_keys(text: &str) -> Vec<MatchSpan> {
-    find_prefixed_secrets(text, &["sk-", "xai-", "anthropic-", "AIza"], 32)
-        .into_iter()
-        .filter(|span| {
-            let token = &text[span.start..span.end];
-            let lower = token.to_ascii_lowercase();
-            !lower.starts_with("sk-revue-")
-        })
-        .collect()
+    find_prefixed_secrets(
+        text,
+        &[
+            // OpenAI / xAI / Anthropic / Gemini and common fine-tuned variants.
+            "sk-",
+            "xai-",
+            "anthropic-",
+            "AIza",
+            // GitHub personal access tokens and Slack bot/user tokens.
+            "ghp_",
+            "xoxb-",
+        ],
+        32,
+    )
+    .into_iter()
+    .filter(|span| {
+        let token = &text[span.start..span.end];
+        let lower = token.to_ascii_lowercase();
+        !lower.starts_with("sk-revue-")
+    })
+    .collect()
 }
 
 fn find_aws_access_key_ids(text: &str) -> Vec<MatchSpan> {
@@ -1148,6 +1170,11 @@ fn find_sensitive_paths(text: &str) -> Vec<MatchSpan> {
         ".aws\\credentials",
         "application_default_credentials.json",
         "gcloud/credentials.db",
+        // Local credential stores for package registries and git auth.
+        ".npmrc",
+        ".netrc",
+        ".git-credentials",
+        ".pypirc",
     ];
     let mut spans = Vec::new();
     for needle in needles {
@@ -1503,6 +1530,26 @@ fn find_webhook_or_tunnel_hosts(text: &str) -> Vec<MatchSpan> {
         "ngrok-free.app",
         "trycloudflare.com",
         "cloudflare-tunnel.com",
+    ] {
+        spans.extend(find_literal_spans(&normalized, pattern));
+    }
+    spans.sort_by_key(|span| span.start);
+    spans
+}
+
+fn find_ip_probe_hosts(text: &str) -> Vec<MatchSpan> {
+    // Literal match of well-known public-IP discovery hosts. A prompt that
+    // resolves its own external address (e.g. "curl ifconfig.me") can be a
+    // metadata-style exfiltration probe, distinct from exfiltration tunnels.
+    let normalized = text.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    for pattern in [
+        "ifconfig.me",
+        "ipinfo.io",
+        "ipify.org",
+        "icanhazip.com",
+        "api.ipify.org",
+        "checkip.amazonaws.com",
     ] {
         spans.extend(find_literal_spans(&normalized, pattern));
     }
@@ -1929,6 +1976,12 @@ mod tests {
                 "send to https://example.com/hook",
                 "webhook handling code is documented without a tunnel host",
             ),
+            (
+                "network.ipProbeHost",
+                "run curl https://ifconfig.me to find the public ip",
+                "run curl https://example.com/ip to find the public ip",
+                "the docs mention detecting the public address without a discovery host",
+            ),
         ];
         let registered: Vec<_> = detector_rules(&policy(false, 10_000))
             .iter()
@@ -2314,6 +2367,105 @@ mod tests {
         assert_eq!(finding.action, AuditAction::Warn);
         assert_eq!(finding.confidence, AuditConfidence::High);
         assert!(!finding.redacted_excerpt.contains(raw_local_key));
+    }
+
+    #[test]
+    fn provider_api_key_detects_github_and_slack_tokens() {
+        let github_token = [
+            "gh",
+            "p_",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx",
+        ]
+        .concat();
+        let slack_token = [
+            "xo",
+            "xb-",
+            "123456789012",
+            "-",
+            "123456789012",
+            "-",
+            "abcdefghijklmnopqrstuvwx",
+        ]
+        .concat();
+
+        for (label, raw) in [("github", github_token), ("slack", slack_token)] {
+            let scope = AuditScope {
+                items: vec![AuditScopeItem {
+                    path: "/messages/0/content".to_string(),
+                    kind: AuditScopeKind::MessageContent,
+                    text: format!("token {raw} in the prompt"),
+                }],
+                scanned_bytes: 44,
+                candidate_bytes: 44,
+                scan_byte_limit: 512,
+                truncated: false,
+            };
+
+            let report = AuditReport::for_scope(&policy(false, 512), &scope);
+            let finding = report
+                .findings
+                .iter()
+                .find(|finding| finding.rule_id == "credential.provider_api_key")
+                .unwrap_or_else(|| panic!("{label} token should match provider_api_key"));
+            assert_eq!(finding.risk_level, RiskLevel::Critical);
+            assert_eq!(finding.action, AuditAction::Block);
+            assert!(!finding.redacted_excerpt.contains(&raw));
+        }
+    }
+
+    #[test]
+    fn provider_api_key_rejects_short_github_like_prefixes() {
+        let scope = AuditScope {
+            items: vec![AuditScopeItem {
+                path: "/messages/0/content".to_string(),
+                kind: AuditScopeKind::MessageContent,
+                text: "ghp_ too short to be a real token".to_string(),
+            }],
+            scanned_bytes: 40,
+            candidate_bytes: 40,
+            scan_byte_limit: 512,
+            truncated: false,
+        };
+
+        let report = AuditReport::for_scope(&policy(false, 512), &scope);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "credential.provider_api_key"),
+            "short ghp_ prefix must not match a provider key"
+        );
+    }
+
+    #[test]
+    fn sensitive_path_detects_local_auth_and_registry_files() {
+        for raw in [
+            "the file ~/.npmrc holds my registry token",
+            "the file ~/.netrc holds my credentials",
+            "the file ~/.git-credentials holds my token",
+            "the file ~/.pypirc holds my registry auth",
+        ] {
+            let scope = AuditScope {
+                items: vec![AuditScopeItem {
+                    path: "/messages/0/content".to_string(),
+                    kind: AuditScopeKind::MessageContent,
+                    text: raw.to_string(),
+                }],
+                scanned_bytes: 44,
+                candidate_bytes: 44,
+                scan_byte_limit: 512,
+                truncated: false,
+            };
+
+            let report = AuditReport::for_scope(&policy(false, 512), &scope);
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule_id == "sensitive_path.local_secret"),
+                "expected sensitive_path for: {raw}"
+            );
+        }
     }
 
     #[test]

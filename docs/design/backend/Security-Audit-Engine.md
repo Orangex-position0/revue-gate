@@ -382,9 +382,9 @@ Block 路径保证：
      - span 落库前现场重扫（report 形状不变，`summary` 证据模式也覆盖）；脱敏一次、存入 `AttemptContext`、retry 复用。
      - 覆盖契约：脱敏覆盖 = detector 扫描覆盖（detector 漏网、`scan_system_messages = false` 未扫系统消息、超 `scan_byte_limit` 未扫部分原样落库）。
 2. **Detector 覆盖补丁** ✅ 已确认实现方案（grill-with-docs 2026-08-20）——分档：先做高价值、低误报、直接防泄露的纯表扩充；噪声类与 Rule Registry / 黑白名单绑定后再做。
-   - **一档（近期，纯表扩充，不改 schema）**：
+   - **一档（近期，纯表扩充，不改 schema）** ✅ 已实现（2026-08-20）：
      - 凭证前缀：`find_provider_api_keys` 前缀表加 `ghp_`（GitHub）、`xoxb-`（Slack），并入 `credential.provider_api_key`（继承 Critical/Block）。
-     - 公网 IP 探测域名：新增 **`network.ipProbeHost`**（High/Warn，字面匹配 `ifconfig.me` / `ipinfo.io` / `ipify.org` 等；独立于 `webhookOrTunnelHost`，因探测 ≠ 外传）。
+     - 公网 IP 探测域名：新增 **`network.ipProbeHost`**（High/Warn，字面匹配 `ifconfig.me` / `ipinfo.io` / `ipify.org` / `icanhazip.com` / `api.ipify.org` / `checkip.amazonaws.com`；独立于 `webhookOrTunnelHost`，因探测 ≠ 外传）。
      - 敏感路径：`find_sensitive_paths` needles 表加 `.npmrc` / `.netrc` / `.git-credentials` / `.pypirc`，并入 `sensitive_path.local_secret`（沿用 High/Warn）。
    - **二档（暂缓，与 Rule Registry / 自定义黑白名单绑定后再做）**：命名敏感字段（`secret_key` / `cookie` / `sessionid=` / `access_key` —— `database_url` 值前缀已覆盖）与 Git 信息读取（`git remote` / `git config` / `gh auth token`）。这些是高误报源，缺乏白名单抑制时会拉低告警可信度，不硬塞进保守 detector。
 3. **请求级 body hash（可选）** ⏸️ **暂缓**（grill-with-docs 2026-08-20）：存 `body_hash`（SHA-256）与 `body_len` 用以日志完整性核对。本地单用户网关上 ROI 有限——hash 只测完整性、不加密、不防篡改者（攻击者可同时改 body 与 hash），真实使用场景（日志被静默改 / 损坏 / 备份校验）目前基本不存在。**触发条件：出现真实完整性核对需求再加**。若将来补，**契约：必须 hash 脱敏后的落库 `request_body`（与上面的「日志体脱敏存储」一致），绝不 hash 原始请求体**——否则会把原始 secret 的指纹留在库中，正是脱敏要避免的二次泄露变体（SHA-256 对低熵 secret 可字典破解）。取值：`body_hash` = SHA-256(脱敏后落库 body)、`body_len` = 其长度。finding 级 `match_hash` 已覆盖去重。
