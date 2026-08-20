@@ -27,7 +27,9 @@ use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
-use crate::domain::security_audit::{AuditAction, AuditPolicy, AuditReport, build_audit_scope};
+use crate::domain::security_audit::{
+    AuditAction, AuditPolicy, AuditReport, build_audit_scope, redact_body,
+};
 use crate::domain::settings::GatewaySettings;
 use crate::usecases::api_key::{AccumulateUsageUsecase, ApiKeyError};
 use crate::usecases::auth::{AuthError, AuthenticateRequestUsecase};
@@ -194,6 +196,13 @@ impl ProxyRequestUsecase {
                 first_upstream_model.clone(),
             )
         });
+        // Decoupled from the audit master switch: whenever a payload is stored, redact it once and reuse
+        // across every retry attempt (see CONTEXT.md "Payload Redaction"). Never touches the forwarded body.
+        let redacted_body = if audit_policy.store_payload {
+            Some(redact_body(&request.body, &audit_policy))
+        } else {
+            None
+        };
         if audit_report
             .as_ref()
             .is_some_and(|report| report.action == AuditAction::Block)
@@ -212,6 +221,7 @@ impl ProxyRequestUsecase {
                 upstream_model: first_upstream_model,
                 is_retry: false,
                 store_payload: audit_policy.store_payload,
+                redacted_body,
                 audit_report,
                 started: Instant::now(),
             };
@@ -242,6 +252,7 @@ impl ProxyRequestUsecase {
                 upstream_model: upstream_model.clone(),
                 is_retry: attempts > 1,
                 store_payload: audit_policy.store_payload,
+                redacted_body: redacted_body.clone(),
                 audit_report: audit_report.clone(),
                 started: Instant::now(),
             };
@@ -350,6 +361,9 @@ struct AttemptContext {
     upstream_model: String,
     is_retry: bool,
     store_payload: bool,
+    /// Redacted copy of the request body for storage; `None` when `store_payload` is false. Reused across
+    /// retry attempts; never used for the forwarded upstream payload.
+    redacted_body: Option<Value>,
     audit_report: Option<AuditReport>,
     started: Instant,
 }
@@ -424,7 +438,12 @@ fn build_log(
         is_stream: ctx.request.stream,
         is_retry: ctx.is_retry,
         trace_id: ctx.request.trace_id.clone(),
-        request_body: ctx.store_payload.then(|| ctx.request.body.to_string()),
+        request_body: ctx.store_payload.then(|| {
+            ctx.redacted_body
+                .clone()
+                .unwrap_or(ctx.request.body.clone())
+                .to_string()
+        }),
         risk_level: audit_report.as_ref().map(|report| report.risk_level),
         audit_action: audit_report.as_ref().map(|report| report.action),
         audit_report,
@@ -1585,5 +1604,105 @@ mod tests {
             "不限重试应尝试全部候选: {err:?}"
         );
         assert_eq!(recorder.lock().unwrap().len(), 3);
+    }
+
+    /// store_payload=true redacts the stored request body (decoupled from the audit switch): the local log
+    /// keeps the matching secret replaced, while the forwarded upstream body stays untouched.
+    #[tokio::test]
+    async fn audit_stored_body_is_redacted_but_forwarded_body_is_not() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let value = Arc::clone(&received);
+        let adaptor = move |_: &Channel| -> Box<dyn ProviderAdaptor> {
+            Box::new(MockForwardAdaptor::with_recorder(
+                Arc::clone(&value),
+                Ok(ok_response(200, None)),
+                Ok(vec![]),
+            ))
+        };
+        let (uc, keys, channels, logs) = harness_with_settings(
+            adaptor,
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: true,
+                    store_payload: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": "key sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 now"
+            }],
+        });
+
+        uc.execute(req).await.expect("success");
+
+        // Stored body: secret replaced, structure and surrounding text preserved.
+        let log = all_request_logs(&*logs).await.pop().expect("log");
+        let stored = log.request_body.expect("payload stored");
+        assert!(!stored.contains("sk-proj-"));
+        assert!(stored.contains("[redacted:credential.provider_api_key]"));
+        assert!(stored.contains("\"role\":\"user\""), "structure kept");
+        assert!(
+            stored.contains("key ") && stored.contains(" now"),
+            "context kept"
+        );
+
+        // Forwarded upstream body: the raw secret is sent unchanged.
+        let sent = received.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].body.to_string().contains("sk-proj-"),
+            "forwarded payload is not redacted"
+        );
+    }
+
+    /// store_payload=true redacts even when the audit master switch is off (decoupled): the local log is
+    /// the defense-in-depth line regardless of enabled.
+    #[tokio::test]
+    async fn payload_stored_without_audit_is_still_redacted() {
+        let (uc, keys, channels, logs) = harness_with_settings(
+            single_ok_adaptor(ok_response(200, None)),
+            GatewaySettings {
+                audit: AuditSettings {
+                    enabled: false, // master switch off
+                    store_payload: true,
+                    ..AuditSettings::default()
+                },
+                ..GatewaySettings::default()
+            },
+        );
+        let key = save_key(&keys).await;
+        save_channel(&channels, "a", &["gpt-4o"], 0).await;
+
+        let mut req = request(Some(&key.key), "gpt-4o", false);
+        req.body = serde_json::json!({
+            "model": "gpt-4o",
+            "stream": false,
+            "messages": [{
+                "role": "user",
+                "content": "leak sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            }],
+        });
+
+        uc.execute(req).await.expect("success");
+
+        let log = all_request_logs(&*logs).await.pop().expect("log");
+        assert_eq!(log.risk_level, None, "audit off: no risk projection");
+        assert_eq!(log.audit_report, None, "audit off: no report");
+        let stored = log.request_body.expect("payload stored");
+        assert!(
+            !stored.contains("sk-proj-"),
+            "stored body is redacted anyway"
+        );
+        assert!(stored.contains("[redacted:credential.provider_api_key]"));
     }
 }
