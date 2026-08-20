@@ -24,7 +24,9 @@ pub enum ServerError {
 /// Handle to a running server: address + shutdown signal + server task.
 struct RunningServer {
     addr: SocketAddr,
+    /// Shutdown signal
     shutdown_tx: oneshot::Sender<()>,
+    // The spawned server task
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -104,6 +106,7 @@ impl ServerManager {
         self.lock_inner().as_ref().map(|s| s.addr)
     }
 
+    /// Acquire the inner lock, recovering from poisoning instead of panicking.
     fn lock_inner(&self) -> MutexGuard<'_, Option<RunningServer>> {
         // Recover the guard when poisoned (a test/command-side panic should not leave the manager permanently unusable)
         self.inner
