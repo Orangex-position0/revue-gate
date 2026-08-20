@@ -2,7 +2,9 @@
 
 > **当前实现文档（v0.2.0）**：安全审计模块已经落地为请求日志的风险扩展。它在请求转发到上游之前扫描 OpenAI-compatible 请求体，生成 `AuditReport`，并把 `risk_level`、`audit_action`、`audit_report` 保存到 `request_logs`。MVP 决策见 [ADR 0001](../../adr/0001-security-audit-mvp.md)，需求规格见 [Spec-security-audit-mvp.md](../../Spec-security-audit-mvp.md)。
 
-## 为什么需要安全审计
+## 1. 概述
+
+### 为什么需要安全审计
 
 AI 对话经网关转发时，请求中可能携带风险内容：
 
@@ -13,36 +15,36 @@ AI 对话经网关转发时，请求中可能携带风险内容：
 
 安全审计引擎回答「请求里有什么风险」。它不是独立合规审计平台，第一版只围绕请求转发链路建立一个小闭环：扫描、聚合、必要时阻断、写入本地日志、供 UI 复核。
 
-## 当前落点
+### 当前落点
 
-| 层次 | 文件 | 职责 |
-| --- | --- | --- |
-| domain | `src-tauri/src/domain/security_audit.rs` | 审计设置、运行期策略、scope builder、detector 规则、finding、report、聚合与截断 |
-| domain | `src-tauri/src/domain/settings.rs` | `GatewaySettings.audit` 设置快照 |
-| domain | `src-tauri/src/domain/request_log.rs` | request log 的 `risk_level`、`audit_action`、`audit_report` 字段 |
-| usecase | `src-tauri/src/usecases/proxy.rs` | 在上游 attempt 前执行审计；根据 report 放行或阻断；retry 复用 report |
-| usecase | `src-tauri/src/usecases/log.rs` | 日志详情解析 request body，同时保留 audit report |
-| infrastructure | `src-tauri/src/infrastructure/sqlite/request_log.rs` | `AuditReport` JSON 序列化/反序列化 |
-| migration | `src-tauri/migrations/002_request_log_audit_fields.sql` | `request_logs` 增加 `risk_level`、`audit_action`、`audit_report` |
-| interface/http | `src-tauri/src/interface/http/handlers.rs` | 将安全阻断映射为 `403 security_policy_blocked` |
-| frontend | `src/types/index.ts` | 对齐后端 camelCase 的 audit 类型 |
-| frontend | `src/pages/settings/SettingsPage.tsx` | 安全审计设置 UI |
-| frontend | `src/pages/logs/LogsPage.tsx` | 风险 badge 与日志详情报告展示 |
+| 层次           | 文件                                                    | 职责                                                                            |
+| -------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| domain         | `src-tauri/src/domain/security_audit.rs`                | 审计设置、运行期策略、scope builder、detector 规则、finding、report、聚合与截断 |
+| domain         | `src-tauri/src/domain/settings.rs`                      | `GatewaySettings.audit` 设置快照                                                |
+| domain         | `src-tauri/src/domain/request_log.rs`                   | request log 的 `risk_level`、`audit_action`、`audit_report` 字段                |
+| usecase        | `src-tauri/src/usecases/proxy.rs`                       | 在上游 attempt 前执行审计；根据 report 放行或阻断；retry 复用 report            |
+| usecase        | `src-tauri/src/usecases/log.rs`                         | 日志详情解析 request body，同时保留 audit report                                |
+| infrastructure | `src-tauri/src/infrastructure/sqlite/request_log.rs`    | `AuditReport` JSON 序列化/反序列化                                              |
+| migration      | `src-tauri/migrations/002_request_log_audit_fields.sql` | `request_logs` 增加 `risk_level`、`audit_action`、`audit_report`                |
+| interface/http | `src-tauri/src/interface/http/handlers.rs`              | 将安全阻断映射为 `403 security_policy_blocked`                                  |
+| frontend       | `src/types/index.ts`                                    | 对齐后端 camelCase 的 audit 类型                                                |
+| frontend       | `src/pages/settings/SettingsPage.tsx`                   | 安全审计设置 UI                                                                 |
+| frontend       | `src/pages/logs/LogsPage.tsx`                           | 风险 badge 与日志详情报告展示                                                   |
 
-## 核心组成
+### 核心组成
 
 安全审计引擎是一条固定顺序的组件流水线。MVP 下四个组件中的三个（Scope Builder、Detector、Aggregator）是 `src-tauri/src/domain/security_audit.rs` 单文件内的**逻辑边界**，不是独立的 crate/module；只有 Action Executor 落在 usecase 层。倒置的依赖方向不变：全部组件只依赖 domain 类型，不接触 DB/HTTP。
 
-| 组件 | 职责 | 代码落点 | 输出 |
-| --- | --- | --- | --- |
-| **Audit Scope Builder** | 把 OpenAI-compatible 请求体扁平化为可扫描的字符串候选，维护 JSON Pointer 路径、scope kind、字节上限与截断 | `build_audit_scope` | `AuditScope` |
-| **Detector** | 声明规则元数据（id、category、risk、action、confidence、suggested action），并按规则分发到确定性匹配函数 | `detector_rules`、`find_rule_matches`、各 `find_*` 函数 | `AuditFinding` 列表 |
-| **Aggregator** | 汇总 finding，产出 request-level 风险等级、分数、动作与报告，含组合升级与截断 | `AuditReport::for_scope`、`report_action`、`has_critical_block_candidate` | `AuditReport` |
-| **Action Executor** | 执行 `report.action`，决定放行或阻断；阻断路径不调用上游、不记账 | `usecases/proxy.rs`、`interface/http/handlers.rs` | 转发 / `403 security_policy_blocked` |
+| 组件                    | 职责                                                                                                      | 代码落点                                                                  | 输出                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
+| **Audit Scope Builder** | 把 OpenAI-compatible 请求体扁平化为可扫描的字符串候选，维护 JSON Pointer 路径、scope kind、字节上限与截断 | `build_audit_scope`                                                       | `AuditScope`                         |
+| **Detector**            | 声明规则元数据（id、category、risk、action、confidence、suggested action），并按规则分发到确定性匹配函数  | `detector_rules`、`find_rule_matches`、各 `find_*` 函数                   | `AuditFinding` 列表                  |
+| **Aggregator**          | 汇总 finding，产出 request-level 风险等级、分数、动作与报告，含组合升级与截断                             | `AuditReport::for_scope`、`report_action`、`has_critical_block_candidate` | `AuditReport`                        |
+| **Action Executor**     | 执行 `report.action`，决定放行或阻断；阻断路径不调用上游、不记账                                          | `usecases/proxy.rs`、`interface/http/handlers.rs`                         | 转发 / `403 security_policy_blocked` |
 
 流水线顺序：`Audit Scope Builder → Detector → Aggregator → Action Executor`，对应「请求链路」一节数据面顺序中的审计段。`AuditReport` 里携带的 `scanned_bytes` / `candidate_bytes` / `scan_byte_limit` / `truncated` 是 Scope Builder 的字节账本原样透传，供 UI 解释扫描覆盖率。
 
-## 请求链路
+## 2. 请求链路
 
 数据面顺序：
 
@@ -66,16 +68,18 @@ HTTP parse
 
 HTTP 错误语义保持区分：
 
-| 场景 | HTTP 状态 | error type |
-| --- | --- | --- |
-| 缺失或无效 Bearer | `401` | `authentication_error` |
-| quota exceeded | `429` | `rate_limit_error` |
-| 非法 JSON / 非法请求 | `400` | `invalid_request_error` |
-| 无候选 channel | `404` | `not_found_error` |
-| 安全策略阻断 | `403` | `security_policy_blocked` |
-| 上游候选全部失败 | `502` | `api_error` |
+| 场景                 | HTTP 状态 | error type                |
+| -------------------- | --------- | ------------------------- |
+| 缺失或无效 Bearer    | `401`     | `authentication_error`    |
+| quota exceeded       | `429`     | `rate_limit_error`        |
+| 非法 JSON / 非法请求 | `400`     | `invalid_request_error`   |
+| 无候选 channel       | `404`     | `not_found_error`         |
+| 安全策略阻断         | `403`     | `security_policy_blocked` |
+| 上游候选全部失败     | `502`     | `api_error`               |
 
-## 设置与策略
+## 3. 关键设计
+
+### 设置与策略
 
 `AuditSettings` 是持久化设置，`AuditPolicy` 是 usecase 在一次请求开始时从设置快照解析出的运行期策略。当前字段一致：
 
@@ -93,19 +97,19 @@ pub struct AuditSettings {
 
 默认值：
 
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `enabled` | `false` | 默认不审计；风险字段写 `null`，避免把未审计请求误当 clean |
-| `mode` | `observe` | 观察模式永不阻断，包括 critical finding |
-| `block_critical` | `true` | 只在 `mode = enforce` 时允许 critical 阻断 |
-| `scan_system_messages` | `false` | 默认跳过 system message |
-| `scan_byte_limit` | `64 * 1024` | 按完整 scope item 截断扫描输入 |
-| `store_payload` | `true` | 沿用原始 request body 日志行为；用户可关闭 |
-| `evidence_level` | `summary` | 当前保存脱敏摘要，不保存完整命中值 |
+| 字段                   | 默认值      | 说明                                                      |
+| ---------------------- | ----------- | --------------------------------------------------------- |
+| `enabled`              | `false`     | 默认不审计；风险字段写 `null`，避免把未审计请求误当 clean |
+| `mode`                 | `observe`   | 观察模式永不阻断，包括 critical finding                   |
+| `block_critical`       | `true`      | 只在 `mode = enforce` 时允许 critical 阻断                |
+| `scan_system_messages` | `false`     | 默认跳过 system message                                   |
+| `scan_byte_limit`      | `64 * 1024` | 按完整 scope item 截断扫描输入                            |
+| `store_payload`        | `true`      | 沿用原始 request body 日志行为；用户可关闭                |
+| `evidence_level`       | `summary`   | 当前保存脱敏摘要，不保存完整命中值                        |
 
 当前 UI 已暴露这些设置。`evidence_level = detailed` 已进入类型和设置，但 MVP 仍不保存 full match；它是后续证据粒度扩展的模型预留。
 
-## Audit Scope
+### Audit Scope
 
 `AuditScope` 是 detector 的唯一输入视图，不复制完整 JSON：
 
@@ -165,39 +169,39 @@ tool_choice, parallel_tool_calls, modalities, audio
 
 当加入下一项会超过 `scan_byte_limit` 时，scope 停止追加后续 item，不截取半个 item；report 保存 `scanned_bytes`、`candidate_bytes`、`scan_byte_limit` 和 `truncated`。
 
-## Detector 规则
+### Detector 规则
 
 当前 detector 全部是项目内置确定性规则，不引入第三方 secret 扫描 crate，不调用 LLM 判别，不解析 DNS。规则元数据在 `detector_rules(policy)` 中定义，匹配由 `find_rule_matches` 分发。
 
-| 规则 ID | 类别 | 风险等级 | 默认 finding 动作 |
-| --- | --- | --- | --- |
-| `credential.private_key` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.provider_api_key` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.aws_access_key_id` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.aws_secret_access_key` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.gcp_oauth_token` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.azure_storage_connection_string` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.database_url` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.bearer_token` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.jwt` | `credential` | `critical` | `block` 或 `warn` |
-| `credential.local_revue_key` | `credential` | `high` | `warn` |
-| `sensitive_path.local_secret` | `sensitivePath` | `high` | `warn` |
-| `unicode.zero_width` | `unicodeObfuscation` | `medium` | `warn` |
-| `unicode.bidi_control` | `unicodeObfuscation` | `medium` | `warn` |
-| `prompt_injection.phrase` | `promptInjection` | `medium` | `warn` |
-| `pii.email` | `pii` | `low` | `logOnly` |
-| `pii.phone` | `pii` | `low` | `logOnly` |
-| `tool.downloadExecute` | `ToolRisk` | `high` | `warn` |
-| `tool.powershellDownloadExecute` | `ToolRisk` | `high` | `warn` |
-| `tool.sensitiveFileExfiltration` | `ToolRisk` | `critical` | `block` 或 `warn` |
-| `network.privateLiteral` | `NetworkRisk` | `high` | `warn` |
-| `network.metadataIp` | `NetworkRisk` | `critical` | `block` 或 `warn` |
-| `network.webhookOrTunnelHost` | `NetworkRisk` | `high` | `warn` |
-| `network.ipProbeHost` | `NetworkRisk` | `high` | `warn` |
+| 规则 ID                                      | 类别                 | 风险等级   | 默认 finding 动作 |
+| -------------------------------------------- | -------------------- | ---------- | ----------------- |
+| `credential.private_key`                     | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.provider_api_key`                | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.aws_access_key_id`               | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.aws_secret_access_key`           | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.gcp_oauth_token`                 | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.azure_storage_connection_string` | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.database_url`                    | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.bearer_token`                    | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.jwt`                             | `credential`         | `critical` | `block` 或 `warn` |
+| `credential.local_revue_key`                 | `credential`         | `high`     | `warn`            |
+| `sensitive_path.local_secret`                | `sensitivePath`      | `high`     | `warn`            |
+| `unicode.zero_width`                         | `unicodeObfuscation` | `medium`   | `warn`            |
+| `unicode.bidi_control`                       | `unicodeObfuscation` | `medium`   | `warn`            |
+| `prompt_injection.phrase`                    | `promptInjection`    | `medium`   | `warn`            |
+| `pii.email`                                  | `pii`                | `low`      | `logOnly`         |
+| `pii.phone`                                  | `pii`                | `low`      | `logOnly`         |
+| `tool.downloadExecute`                       | `ToolRisk`           | `high`     | `warn`            |
+| `tool.powershellDownloadExecute`             | `ToolRisk`           | `high`     | `warn`            |
+| `tool.sensitiveFileExfiltration`             | `ToolRisk`           | `critical` | `block` 或 `warn` |
+| `network.privateLiteral`                     | `NetworkRisk`        | `high`     | `warn`            |
+| `network.metadataIp`                         | `NetworkRisk`        | `critical` | `block` 或 `warn` |
+| `network.webhookOrTunnelHost`                | `NetworkRisk`        | `high`     | `warn`            |
+| `network.ipProbeHost`                        | `NetworkRisk`        | `high`     | `warn`            |
 
 表中的 `block` 或 `warn` 由 `block_critical` 决定：`block_critical = true` 时 critical 规则的 finding 动作为 `Block`，否则为 `Warn`。但 request-level 是否真的阻断还要经过 `AuditMode::Enforce` 判断。
 
-### 覆盖补丁（已实现 2026-08-20）
+#### 覆盖补丁（已实现 2026-08-20）
 
 在 MVP 规则之上做的高价值、低误报、直接防泄露的纯表扩充，不改 schema：
 
@@ -207,7 +211,7 @@ tool_choice, parallel_tool_calls, modalities, audio
 
 排查后的其它候选（命名敏感字段 `secret_key` / `cookie` / `sessionid=` / `access_key`，以及 Git 信息读取 `git remote` / `git config` / `gh auth token`）是高误报源，缺乏白名单抑制时会拉低告警可信度，**明确暂缓**，与 Rule Registry / 自定义黑白名单绑定后再做。
 
-## Finding 与证据
+### Finding 与证据
 
 `AuditFinding` 是 detector 输出，也是 `AuditReport.findings` 中保存的结构：
 
@@ -232,7 +236,7 @@ pub struct AuditFinding {
 
 单条规则最多保留 20 条 finding；报告最多保留 50 条 finding。超出时仍保留 `total_findings` 和 `findings_truncated`。
 
-## Audit Report 与聚合
+### Audit Report 与聚合
 
 `AuditReport` 是 request-level 风险投影：
 
@@ -273,16 +277,16 @@ ToolRisk + NetworkRisk + credential => Critical block candidate
 
 另外，critical 且 finding action 为 `Block` 的规则天然是 block candidate，例如 provider/private/cloud credential、database URL、Bearer token、JWT、metadata IP 和敏感文件外传。
 
-## 执行动作
+### 执行动作
 
 MVP 执行四种 request-level 动作中的三种：
 
-| 动作 | 当前行为 |
-| --- | --- |
-| `Allow` | 继续转发，写 clean report |
-| `LogOnly` | 继续转发，写低风险报告 |
-| `Warn` | 继续转发，写告警报告 |
-| `Block` | 不调用上游，写本地日志，返回 `403 security_policy_blocked` |
+| 动作      | 当前行为                                                   |
+| --------- | ---------------------------------------------------------- |
+| `Allow`   | 继续转发，写 clean report                                  |
+| `LogOnly` | 继续转发，写低风险报告                                     |
+| `Warn`    | 继续转发，写告警报告                                       |
+| `Block`   | 不调用上游，写本地日志，返回 `403 security_policy_blocked` |
 
 `Redact` 和 `Confirm` 已保留在 `AuditAction` 类型中，但当前聚合器不会产出，也不会执行 payload 改写或桌面确认。
 
@@ -296,16 +300,9 @@ Block 路径保证：
 - `audit_report.upstream_forwarded = false`。
 - 保留计划渠道和计划上游模型用于解释。
 
-## 与 retry 的关系
+## 4. 数据与日志
 
-审计对象是 logical request，不是单次上游 attempt。`ProxyRequestUsecase` 在进入 retry loop 前生成一次 `AuditReport`：
-
-- 放行后如果第一个候选失败，后续 retry attempt 复用同一份 report。
-- 每条 attempt log 都带相同 `audit_report` 和同一 `trace_id`。
-- 统计风险请求时应按 `trace_id` 去重，避免 retry 放大风险请求数。
-- 落库脱敏（见「[日志体脱敏存储（Payload Redaction）](#日志体脱敏存储payload-redaction)」）在 `execute` 算一次、存入 `AttemptContext`、所有 retry attempt 复用同一份已脱敏 body；转发 payload 永不被改写。
-
-## 与请求日志的关系
+### 与请求日志的关系
 
 安全审计结果复用 `request_logs`，不另建 `audit_events`：
 
@@ -317,7 +314,7 @@ Block 路径保证：
 
 `store_payload = false` 时，`request_body = None`，但 `audit_report` 仍保存。日志详情在没有 request body 时显示空 conversation / params，同时仍展示风险报告；这保证了隐私和安全复核之间的基本平衡。
 
-## 日志体脱敏存储（Payload Redaction）
+### 日志体脱敏存储（Payload Redaction）
 
 > 已实现（2026-08-20）。语义见 CONTEXT.md「Payload Redaction」；MVP 决策见 [ADR 0001](../../adr/0001-security-audit-mvp.md)。
 
@@ -332,7 +329,16 @@ Block 路径保证：
 - 重叠 / 相邻 span 合并后 last→first 逐字节改写，避免偏移漂移。
 - **覆盖契约**：脱敏覆盖 = detector 扫描覆盖（detector 漏网、`scan_system_messages = false` 未扫系统消息、超 `scan_byte_limit` 未扫部分原样落库）。
 
-## 前端展示
+### 与 retry 的关系
+
+审计对象是 logical request，不是单次上游 attempt。`ProxyRequestUsecase` 在进入 retry loop 前生成一次 `AuditReport`：
+
+- 放行后如果第一个候选失败，后续 retry attempt 复用同一份 report。
+- 每条 attempt log 都带相同 `audit_report` 和同一 `trace_id`。
+- 统计风险请求时应按 `trace_id` 去重，避免 retry 放大风险请求数。
+- 落库脱敏（见「[日志体脱敏存储（Payload Redaction）](#日志体脱敏存储payload-redaction)」）在 `execute` 算一次、存入 `AttemptContext`、所有 retry attempt 复用同一份已脱敏 body；转发 payload 永不被改写。
+
+## 5. 前端展示
 
 设置页已经暴露：
 
@@ -358,7 +364,9 @@ Block 路径保证：
 
 当 `upstreamForwarded = false` 时，UI 明确提示请求被本地安全策略拦截，未到达上游 provider。
 
-## 测试覆盖
+## 6. 质量与演进
+
+### 测试覆盖
 
 当前测试围绕公开 seam 验证行为：
 
@@ -371,7 +379,7 @@ Block 路径保证：
 - Retry：证明多次 attempt 复用同一份 risk report。
 - Bounded-size：长 prompt 和大量 findings 保持有界。
 
-## 安全红线
+### 安全红线
 
 - **默认不阻断**：只有用户启用审计并切到 enforce，critical block candidate 才可能阻断。
 - **阻断是本地策略拒绝**：阻断请求不转发、不消耗 provider quota、不记录 provider usage，HTTP 返回 `403 security_policy_blocked`。
@@ -380,7 +388,7 @@ Block 路径保证：
 - **无 DNS 解析**：网络检测只看字面 IP 和 hostname 模式，避免额外网络 IO、缓存、超时和隐私问题。
 - **响应审计暂缓**：MVP 不做响应侧同步扫描，也不做 streaming chunk 增量审计。
 
-## 后续版本
+### 后续版本
 
 下一版可以在当前 JSON report shape 之上拆出更独立的安全审计中心：
 
@@ -392,28 +400,14 @@ Block 路径保证：
 - 响应审计：检查模型回显 secret、危险命令或泄露系统提示。
 - 外部 guardrail provider：在用户接受网络调用、延迟和隐私成本后再接入。
 
-## 改进计划（对照 WaLiAPI 评审）
+### 改进计划（待办）
 
-对照参考项目 WaLiAPI 的 `security/` 实现评审后的结论，分三档执行。评审后确认落地的项已完成并作为正式设计固化在正文对应章节；本节保留待办状态摘要。
+#### 明确暂缓
 
-### 一、已落地（2026-08-20）
-
-1. **日志体脱敏存储** ✅ 已实现。设计见上文「[日志体脱敏存储（Payload Redaction）](#日志体脱敏存储payload-redaction)」。
-2. **Detector 覆盖补丁（一档）** ✅ 已实现。设计见上文「[覆盖补丁](#覆盖补丁已实现-2026-08-20)」；其中二档（命名敏感字段、Git 信息读取）仍暂缓，绑定 Rule Registry / 黑白名单后再做。
-
-### 二、明确暂缓
-
-| 项 | 暂缓原因 |
-| --- | --- |
-| **请求级 body hash（可选）** | 存 `body_hash`（SHA-256）与 `body_len` 用以日志完整性核对。本地单用户网关上 ROI 有限——hash 只测完整性、不加密、不防篡改者（攻击者可同时改 body 与 hash），真实使用场景（日志被静默改 / 损坏 / 备份校验）目前基本不存在。**触发条件：出现真实完整性核对需求再加**。若将来补，**契约：必须 hash 脱敏后的落库 `request_body`（见「[日志体脱敏存储](#日志体脱敏存储payload-redaction)」），绝不 hash 原始请求体**——否则会把原始 secret 的指纹留在库中，正是脱敏要避免的二次泄露变体（SHA-256 对低熵 secret 可字典破解）。取值：`body_hash` = SHA-256(脱敏后落库 body)、`body_len` = 其长度。finding 级 `match_hash` 已覆盖去重。 |
-| 规则入库 + 播种时机（WaLiAPI 25 条种子表） | 归 "[后续版本](#后续版本) 的 Rule Registry / 安全审计中心；单用户本地工具手动调规则频率低 |
-| 自定义黑白名单 | **WaLiAPI 的该功能是死代码**（`apply_custom_rules` / `is_whitelisted` 零调用点，未接入运行时扫描），没有可照搬的现成实现；唯一 ROI 是"白名单抑制误报"，等误报真实出现再做 |
-| 全量扫描预算（字节/节点/深度/耗时，超限 fail-closed） | 已按 item 截断 + serde_json 递归上限兜底；单用户本地网关的威胁模型不是恶意 DoS |
-| 响应侧 / streaming delta 扫描 | 与"安全红线：响应审计暂缓"一致 |
-
-### 三、不回退的差异（本实现更优）
-
-- 强类型 `AuditMode` / `AuditEvidenceLevel` 枚举，优于 WaLiAPI 的 `mode: String` 设置袋。
-- `redacted_excerpt`（前后 24 字符上下文）定位信息多于 WaLiAPI 的 `evidence_masked`（8+4 字符），且同样不泄密。
-- 20/规则 + 50/报告 双重截断，优于 WaLiAPI 单层 80。
-- 显式组合升级（Tool + Network + Path/Cred）可向用户解释，优于 WaLiAPI 分数加法黑盒（`+25/+25/+15/+20`）。
+| 项                                                    | 暂缓原因                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **请求级 body hash（可选）**                          | 存 `body_hash`（SHA-256）与 `body_len` 用以日志完整性核对。本地单用户网关上 ROI 有限——hash 只测完整性、不加密、不防篡改者（攻击者可同时改 body 与 hash），真实使用场景（日志被静默改 / 损坏 / 备份校验）目前基本不存在。**触发条件：出现真实完整性核对需求再加**。若将来补，**契约：必须 hash 脱敏后的落库 `request_body`（见「[日志体脱敏存储](#日志体脱敏存储payload-redaction)」），绝不 hash 原始请求体**——否则会把原始 secret 的指纹留在库中，正是脱敏要避免的二次泄露变体（SHA-256 对低熵 secret 可字典破解）。取值：`body_hash` = SHA-256(脱敏后落库 body)、`body_len` = 其长度。finding 级 `match_hash` 已覆盖去重。 |
+| 规则入库 + 播种时机（WaLiAPI 25 条种子表）            | 归 "[后续版本](#后续版本) 的 Rule Registry / 安全审计中心；单用户本地工具手动调规则频率低                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 自定义黑白名单                                        | **WaLiAPI 的该功能是死代码**（`apply_custom_rules` / `is_whitelisted` 零调用点，未接入运行时扫描），没有可照搬的现成实现；唯一 ROI 是"白名单抑制误报"，等误报真实出现再做                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 全量扫描预算（字节/节点/深度/耗时，超限 fail-closed） | 已按 item 截断 + serde_json 递归上限兜底；单用户本地网关的威胁模型不是恶意 DoS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 响应侧 / streaming delta 扫描                         | 与"安全红线：响应审计暂缓"一致                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
