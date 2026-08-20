@@ -197,6 +197,16 @@ tool_choice, parallel_tool_calls, modalities, audio
 
 表中的 `block` 或 `warn` 由 `block_critical` 决定：`block_critical = true` 时 critical 规则的 finding 动作为 `Block`，否则为 `Warn`。但 request-level 是否真的阻断还要经过 `AuditMode::Enforce` 判断。
 
+### 覆盖补丁（已实现 2026-08-20）
+
+在 MVP 规则之上做的高价值、低误报、直接防泄露的纯表扩充，不改 schema：
+
+- **provider 凭证前缀**：`find_provider_api_keys` 前缀表在既有 `sk-` / `xai-` / `anthropic-` / `AIza` 之外，新增 `ghp_`（GitHub PAT）与 `xoxb-`（Slack token），并入 `credential.provider_api_key`（继承 Critical/Block）。
+- **公网 IP 探测域名**：新增 **`network.ipProbeHost`**（High/Warn），字面匹配 `ifconfig.me` / `ipinfo.io` / `ipify.org` / `icanhazip.com` / `api.ipify.org` / `checkip.amazonaws.com`。独立于 `webhookOrTunnelHost`，因为 IP 探测 ≠ 数据外传——探测解析自身外网地址（如 `curl ifconfig.me`）是 metadata 式外泄前兆。
+- **敏感路径 needles**：`find_sensitive_paths` 在既有 `.env` / `~/.ssh` / 云凭据目录之外，新增 `.npmrc` / `.netrc` / `.git-credentials` / `.pypirc`，并入 `sensitive_path.local_secret`（沿用 High/Warn）。
+
+排查后的其它候选（命名敏感字段 `secret_key` / `cookie` / `sessionid=` / `access_key`，以及 Git 信息读取 `git remote` / `git config` / `gh auth token`）是高误报源，缺乏白名单抑制时会拉低告警可信度，**明确暂缓**，与 Rule Registry / 自定义黑白名单绑定后再做。
+
 ## Finding 与证据
 
 `AuditFinding` 是 detector 输出，也是 `AuditReport.findings` 中保存的结构：
@@ -293,7 +303,7 @@ Block 路径保证：
 - 放行后如果第一个候选失败，后续 retry attempt 复用同一份 report。
 - 每条 attempt log 都带相同 `audit_report` 和同一 `trace_id`。
 - 统计风险请求时应按 `trace_id` 去重，避免 retry 放大风险请求数。
-- 如果未来实现 redaction，所有 retry attempt 必须复用同一份已脱敏 payload。
+- 落库脱敏（见「[日志体脱敏存储（Payload Redaction）](#日志体脱敏存储payload-redaction)」）在 `execute` 算一次、存入 `AttemptContext`、所有 retry attempt 复用同一份已脱敏 body；转发 payload 永不被改写。
 
 ## 与请求日志的关系
 
@@ -306,6 +316,21 @@ Block 路径保证：
 `AuditPolicy.enabled = false` 时，这三个字段写 `null`。只有启用审计且扫描完成但无 finding 时，才写 `Clean / Allow / empty findings`。
 
 `store_payload = false` 时，`request_body = None`，但 `audit_report` 仍保存。日志详情在没有 request body 时显示空 conversation / params，同时仍展示风险报告；这保证了隐私和安全复核之间的基本平衡。
+
+## 日志体脱敏存储（Payload Redaction）
+
+> 已实现（2026-08-20）。语义见 CONTEXT.md「Payload Redaction」；MVP 决策见 [ADR 0001](../../adr/0001-security-audit-mvp.md)。
+
+`store_payload = true` 时，落库前的 `request_body` 会做一次脱敏，防止完整 secret 以原始明文长期留在本地日志（「日志二次泄露」红线）。
+
+**实现**：落库前对 body 递归脱敏，直接复用 detector 算法（`build_audit_scope` + `detect_findings`）拿命中 `(path, MatchSpan)`，把匹配片段逐字节替换为 `[redacted:<rule_id>]`，保留 JSON 结构与未命中内容。这比另写一套正则脱敏更省，且与 finding 的 `match_hash` 天然一致。代码落在 `domain/security_audit.rs` 的 `redact_body`，usecase 在 `proxy.rs` 计算一次存入 `AttemptContext`、retry 复用。
+
+**关键契约**：
+
+- **只脱敏落库副本，转发 body 永不变**（`Redact` action 仍延后，语义同 ADR 0001）。
+- **脱敏与 `enabled` 解耦**：只要 `store_payload = true` 就脱敏，无论审计开关；`enabled = false` 时脱敏结果不计入 report，仅作落库防线。
+- 重叠 / 相邻 span 合并后 last→first 逐字节改写，避免偏移漂移。
+- **覆盖契约**：脱敏覆盖 = detector 扫描覆盖（detector 漏网、`scan_system_messages = false` 未扫系统消息、超 `scan_byte_limit` 未扫部分原样落库）。
 
 ## 前端展示
 
@@ -369,30 +394,18 @@ Block 路径保证：
 
 ## 改进计划（对照 WaLiAPI 评审）
 
-对照参考项目 WaLiAPI 的 `security/` 实现评审后的结论，分三档执行。
+对照参考项目 WaLiAPI 的 `security/` 实现评审后的结论，分三档执行。评审后确认落地的项已完成并作为正式设计固化在正文对应章节；本节保留待办状态摘要。
 
-### 一、采纳（近期落地）
+### 一、已落地（2026-08-20）
 
-1. **日志体脱敏存储** ✅ 已确认实现方案（grill-with-docs 2026-08-20，见 CONTEXT.md「Payload Redaction」）：
-   - 现状问题：`store_payload = true` 时 `build_log` （`proxy.rs`）直存 `ctx.request.body`，全量 secret 落库，违背「日志二次泄露」红线。
-   - 方案：落库前对 body 做一次递归脱敏，直接复用 detector 算法（`build_audit_scope` + `detect_findings`）拿命中 `(path, MatchSpan)`，把匹配片段逐字节替换为 `[redacted:<rule_id>]`，保留 JSON 结构与未命中内容。比另写一套正则脱敏更省，且与 finding 的 `match_hash` 天然一致。
-   - 关键决策：
-     - **只脱敏落库副本，转发 body 永不变**（`Redact` action 仍延后，语义同 ADR 0001）。
-     - **脱敏与 `enabled` 解耦**：只要 `store_payload = true` 就脱敏，无论审计开关；`enabled = false` 时脱敏结果不计入 report，仅作落库防线。
-     - span 落库前现场重扫（report 形状不变，`summary` 证据模式也覆盖）；脱敏一次、存入 `AttemptContext`、retry 复用。
-     - 覆盖契约：脱敏覆盖 = detector 扫描覆盖（detector 漏网、`scan_system_messages = false` 未扫系统消息、超 `scan_byte_limit` 未扫部分原样落库）。
-2. **Detector 覆盖补丁** ✅ 已确认实现方案（grill-with-docs 2026-08-20）——分档：先做高价值、低误报、直接防泄露的纯表扩充；噪声类与 Rule Registry / 黑白名单绑定后再做。
-   - **一档（近期，纯表扩充，不改 schema）** ✅ 已实现（2026-08-20）：
-     - 凭证前缀：`find_provider_api_keys` 前缀表加 `ghp_`（GitHub）、`xoxb-`（Slack），并入 `credential.provider_api_key`（继承 Critical/Block）。
-     - 公网 IP 探测域名：新增 **`network.ipProbeHost`**（High/Warn，字面匹配 `ifconfig.me` / `ipinfo.io` / `ipify.org` / `icanhazip.com` / `api.ipify.org` / `checkip.amazonaws.com`；独立于 `webhookOrTunnelHost`，因探测 ≠ 外传）。
-     - 敏感路径：`find_sensitive_paths` needles 表加 `.npmrc` / `.netrc` / `.git-credentials` / `.pypirc`，并入 `sensitive_path.local_secret`（沿用 High/Warn）。
-   - **二档（暂缓，与 Rule Registry / 自定义黑白名单绑定后再做）**：命名敏感字段（`secret_key` / `cookie` / `sessionid=` / `access_key` —— `database_url` 值前缀已覆盖）与 Git 信息读取（`git remote` / `git config` / `gh auth token`）。这些是高误报源，缺乏白名单抑制时会拉低告警可信度，不硬塞进保守 detector。
-3. **请求级 body hash（可选）** ⏸️ **暂缓**（grill-with-docs 2026-08-20）：存 `body_hash`（SHA-256）与 `body_len` 用以日志完整性核对。本地单用户网关上 ROI 有限——hash 只测完整性、不加密、不防篡改者（攻击者可同时改 body 与 hash），真实使用场景（日志被静默改 / 损坏 / 备份校验）目前基本不存在。**触发条件：出现真实完整性核对需求再加**。若将来补，**契约：必须 hash 脱敏后的落库 `request_body`（与上面的「日志体脱敏存储」一致），绝不 hash 原始请求体**——否则会把原始 secret 的指纹留在库中，正是脱敏要避免的二次泄露变体（SHA-256 对低熵 secret 可字典破解）。取值：`body_hash` = SHA-256(脱敏后落库 body)、`body_len` = 其长度。finding 级 `match_hash` 已覆盖去重。
+1. **日志体脱敏存储** ✅ 已实现。设计见上文「[日志体脱敏存储（Payload Redaction）](#日志体脱敏存储payload-redaction)」。
+2. **Detector 覆盖补丁（一档）** ✅ 已实现。设计见上文「[覆盖补丁](#覆盖补丁已实现-2026-08-20)」；其中二档（命名敏感字段、Git 信息读取）仍暂缓，绑定 Rule Registry / 黑白名单后再做。
 
 ### 二、明确暂缓
 
 | 项 | 暂缓原因 |
 | --- | --- |
+| **请求级 body hash（可选）** | 存 `body_hash`（SHA-256）与 `body_len` 用以日志完整性核对。本地单用户网关上 ROI 有限——hash 只测完整性、不加密、不防篡改者（攻击者可同时改 body 与 hash），真实使用场景（日志被静默改 / 损坏 / 备份校验）目前基本不存在。**触发条件：出现真实完整性核对需求再加**。若将来补，**契约：必须 hash 脱敏后的落库 `request_body`（见「[日志体脱敏存储](#日志体脱敏存储payload-redaction)」），绝不 hash 原始请求体**——否则会把原始 secret 的指纹留在库中，正是脱敏要避免的二次泄露变体（SHA-256 对低熵 secret 可字典破解）。取值：`body_hash` = SHA-256(脱敏后落库 body)、`body_len` = 其长度。finding 级 `match_hash` 已覆盖去重。 |
 | 规则入库 + 播种时机（WaLiAPI 25 条种子表） | 归 "[后续版本](#后续版本) 的 Rule Registry / 安全审计中心；单用户本地工具手动调规则频率低 |
 | 自定义黑白名单 | **WaLiAPI 的该功能是死代码**（`apply_custom_rules` / `is_whitelisted` 零调用点，未接入运行时扫描），没有可照搬的现成实现；唯一 ROI 是"白名单抑制误报"，等误报真实出现再做 |
 | 全量扫描预算（字节/节点/深度/耗时，超限 fail-closed） | 已按 item 截断 + serde_json 递归上限兜底；单用户本地网关的威胁模型不是恶意 DoS |
