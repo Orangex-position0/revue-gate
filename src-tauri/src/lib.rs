@@ -30,6 +30,8 @@ use interface::commands::settings::{apply_autostart, get_settings, save_settings
 use interface::commands::stats::{get_stats, usage_stats};
 use interface::http::handlers::AppState;
 use interface::http::server::ServerManager;
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
@@ -43,13 +45,27 @@ use crate::usecases::proxy::ProxyRequestUsecase;
 /// Tray "Quit" flag: closing-to-tray intercepts CloseRequested, so the quit path must set this first.
 static FORCE_QUIT: AtomicBool = AtomicBool::new(false);
 
-/// Build the tray icon and menu (Start service / Stop service / Quit); left click shows the main window.
+/// Restore the main window from explicit user actions (tray click/menu or macOS Dock reopen).
+fn restore_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.show();
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Build the tray icon and menu (Show window / Start service / Stop service / Quit); left click shows the main window.
 /// Start/stop reuse the command-layer `start_gateway` / `stop_gateway` (host/port read from shared settings, effective immediately after save).
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动服务", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&start, &stop, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &start, &stop, &quit])?;
     let icon = app
         .default_window_icon()
         .cloned()
@@ -62,6 +78,9 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // On Windows a left click does not pop the menu; on_tray_icon_event shows the main window instead.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                restore_main_window(app);
+            }
             "start" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -91,11 +110,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 button_state: MouseButtonState::Up,
                 ..
             } = event
-                && let Some(window) = tray.app_handle().get_webview_window("main")
             {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
+                restore_main_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -247,6 +263,18 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            {
+                if let RunEvent::Reopen { .. } = event {
+                    restore_main_window(app);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, &event);
+            }
+        });
 }
