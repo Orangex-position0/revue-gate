@@ -33,12 +33,13 @@
 - 内置 5 类渠道：OpenAI / DeepSeek / Custom 走 OpenAI-compatible 直通；Claude / Gemini 走协议转换适配器
 - 字段：名称、类型、Base URL、API Key、支持模型列表、优先级、权重、模型映射、状态、最近测试时间/结果
 - 渠道连通性测试：`GET {base_url}/models` 探测（OpenAI 兼容端点），记录成功/失败、延迟、测试时间；Claude/Gemini 用各自模型列表端点，由 `ProviderAdaptor::test()` 实现
+- 模型列表默认使用静态推荐值；用户可在渠道表单里手动获取 provider-reported 模型列表，失败时保留当前列表并展示错误
 - 模型映射：客户端统一模型名 ↔ 上游实际模型名，未映射时直传
 
 ### 密钥管理
 
 - 本地密钥 CRUD、启停
-- 密钥格式：`sk-revue-<16 位随机 hex>`（26 字符，8 字节熵）
+- 密钥格式：`sk-revue-<16 位随机 hex>`（25 字符，8 字节熵）
 - HTTP 请求以 `Authorization: Bearer <key>` 认证，失败返回 `401`
 - 配额上限：`quota_used >= quota_limit` 时返回 `429`
 
@@ -135,9 +136,13 @@ src-tauri/src/
 │   └── settings.rs          #   设置用例
 ├── infrastructure.rs        #   infrastructure 模块入口
 ├── infrastructure/          # 基础设施层：技术实现
-│   ├── sqlite.rs            #   sqlx 连接池 + 内嵌迁移（仓储实现落地后升级为 sqlite.rs + sqlite/）
+│   ├── sqlite.rs            #   sqlx 连接池 + 内嵌迁移入口，含 SQLite 仓储共享 helper
+│   ├── sqlite/              #   SQLite 仓储实现
+│   │   ├── channel.rs       #     ChannelRepository 的 sqlx 实现
+│   │   ├── api_key.rs       #     ApiKeyRepository 的 sqlx 实现
+│   │   └── request_log.rs   #     RequestLogRepository 的 sqlx 实现
 │   ├── providers.rs         #   providers 模块入口
-│   └── providers/           #   供应商适配器实现（openai / claude / gemini / deepseek / custom）
+│   └── providers/           #   供应商适配器实现（openai-compatible / claude / gemini）
 ├── interface.rs             #   interface 模块入口（pub mod http / commands）
 ├── interface/               # 入口层
 │   ├── http.rs              #   http 模块入口（pub mod router / server）
@@ -149,15 +154,14 @@ src-tauri/src/
 │   └── commands/            #   Tauri 控制面
 │       ├── server.rs        #     服务生命周期命令 + 状态事件
 │       └── ...              #     渠道/密钥/日志/统计命令（阶段 03+）
-├── utils.rs                 #   utils 模块入口
-└── utils/                   # 通用小工具（如 hex 编码；ID 用 uuid crate，时间用 chrono，不自研）
+└── test_support.rs          #   测试用 in-memory 仓储与 mock provider
 ```
 
 设计要点：
 
 - **一聚合一文件**：领域规模小（3 个聚合根），每个聚合根一个文件，仓储 trait 随聚合根放置，不拆 model/repository/service 子文件夹。单文件超过 ~400 行或出现多个独立子类型时，升级为 `channel/{model,repository,service}` 文件夹
 - **2024 Edition 模块组织**：全部使用 `foo.rs` 命名，不使用 `mod.rs`；子模块以 `foo/bar.rs` + `crate::foo::bar` 引用
-- **ProviderAdaptor trait 隔离供应商差异**：核心代理只依赖 trait，不关心供应商协议；协议转换限制在 `infrastructure/providers/`
+- **ProviderAdaptor trait 隔离供应商差异**：核心代理只依赖 trait，不关心供应商协议；协议转换限制在 `infrastructure/providers/`，模型发现通过 `fetch_models()` 显式表达支持或 unsupported
 - **领域服务 vs 用例**：domain 里的 dispatcher/quota 只做纯业务判断（选哪个渠道、是否超配额），不碰 DB 和 HTTP；usecases 负责编排
 
 ### 前端

@@ -57,7 +57,7 @@
 > **参考回答**：
 >
 > - 仓储 trait（如 `ChannelRepository`）定义在 `domain/channel.rs`，只依赖领域实体和 `RepositoryError`；sqlx 实现在 `infrastructure/sqlite/`。用例层只依赖 trait——依赖方向 `interface → usecases → domain ← infrastructure` 全部指向内层。
-> - 供应商适配器同理：`ProviderAdaptor` trait 定义在 `domain/provider.rs`，方法签名只返回领域类型（`ProviderResponse`、`Usage`），**不暴露 reqwest/axum 类型**；`forward_stream` 返回 OpenAI 兼容的 SSE 字节流，数据面只透传。
+> - 供应商适配器同理：`ProviderAdaptor` trait 定义在 `domain/provider.rs`，方法签名只返回领域类型（`ProviderResponse`、`TokenUsage` 等），**不暴露 reqwest/axum 类型**；`forward_stream` 返回 OpenAI 兼容的 SSE 字节流，数据面只透传。
 > - 生产在 `lib.rs` 装配时用 `adaptor_for(channel_type)` 闭包解析具体适配器，测试用 `MockForwardAdaptor` 替换——「按接口注入」的落点。
 
 ## 二、供应商协议隔离
@@ -66,10 +66,10 @@
 
 > **参考回答**：
 >
-> - trait 只有五个方法：`channel_type` / `default_models` / `default_base_url` / `test`（连通性探测）/ `forward`（非流式）/ `forward_stream`（流式）。
-> - 关键设计点：**业务错误不进 `ProviderError`**。`ProviderError` 只表达「未配置 / 传输失败 / 响应解析失败」；上游 4xx/5xx 由 `forward` 以 `status_code + body` 原样返回，**重试决策留给用例层**（`is_retryable`）。适配器只关心「怎么讲对方的话」，不关心「要不要换渠道」。
-> - 协议差异收敛在两处：`Usage` 归一化（OpenAI `usage` / Claude `input|output_tokens` / Gemini `usageMetadata` → 统一 `prompt/completion/total_tokens`），以及响应体的 OpenAI 兼容转换。
-> - 新增供应商只改 `infrastructure/providers/`：新建一个实现 + 在 `adaptor_for` 加一个 `ChannelType` 分支，domain / usecases / interface 零改动。OpenAI / DeepSeek / Custom 共用 OpenAI-compatible 直通，只有 Claude / Gemini 要真转换。
+> - trait 有七个方法：`channel_type` / `default_models` / `fetch_models` / `default_base_url` / `test`（连通性探测）/ `forward`（非流式）/ `forward_stream`（流式）。
+> - 关键设计点：**业务错误不进 `ProviderError`**。`ProviderError` 表达「未配置 / 能力不支持 / 传输失败 / 响应解析失败」；上游 4xx/5xx 由 `forward` 以 `status_code + body` 返回，**重试决策留给用例层**（`is_retryable`）。适配器只关心「怎么讲对方的话」，不关心「要不要换渠道」。
+> - 协议差异收敛在两处：`TokenUsage` 归一化（OpenAI `usage` / Claude `input|output_tokens` / Gemini `usageMetadata` → 统一 `prompt/completion/total_tokens`），以及响应体的 OpenAI 兼容转换。
+> - 新增供应商通常改 `infrastructure/providers/` 和 `adaptor_for`；若出现新的 provider 种类，还要补 `ChannelType` 及前端表单枚举。OpenAI / DeepSeek / Custom 共用 OpenAI-compatible 直通，只有 Claude / Gemini 要真转换。
 
 ### Q4：为什么 OpenAI / DeepSeek / Custom 直通，Claude / Gemini 要协议转换？
 
