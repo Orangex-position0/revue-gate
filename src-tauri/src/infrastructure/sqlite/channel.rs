@@ -6,13 +6,13 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType};
 use crate::domain::error::RepositoryError;
+use crate::infrastructure::sqlite::{bad_row, db_err, fmt_utc, parse_utc};
 
 /// Row mapping for the channel table: one-to-one with the channels columns in `migrations/001_init.sql`.
 /// JSON columns are read as String first, then parsed by `TryFrom` (avoiding array types unsupported by sqlx).
@@ -91,7 +91,7 @@ impl ChannelRepository for SqliteChannelRepository {
         )
         .bind(channel.id.to_string())
         .bind(&channel.name)
-        .bind(channel_type_to_str(channel.channel_type))
+        .bind(channel.channel_type.to_string())
         .bind(&channel.base_url)
         .bind(&channel.api_key)
         .bind(models)
@@ -99,10 +99,10 @@ impl ChannelRepository for SqliteChannelRepository {
         .bind(channel.weight)
         .bind(mappings)
         .bind(channel.enabled)
-        .bind(channel.last_test_at.map(|dt| dt.to_rfc3339()))
+        .bind(channel.last_test_at.map(fmt_utc))
         .bind(channel.last_test_ok)
-        .bind(channel.created_at.to_rfc3339())
-        .bind(channel.updated_at.to_rfc3339())
+        .bind(fmt_utc(channel.created_at))
+        .bind(fmt_utc(channel.updated_at))
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -128,13 +128,14 @@ impl TryFrom<ChannelDb> for Channel {
 
     fn try_from(row: ChannelDb) -> Result<Self, Self::Error> {
         let models = serde_json::from_str(&row.models)
-            .map_err(|e| bad_row(&format!("invalid models json: {e}")))?;
+            .map_err(|e| bad_row("channel", &format!("invalid models json: {e}")))?;
         let model_mappings = serde_json::from_str(&row.model_mappings)
-            .map_err(|e| bad_row(&format!("invalid model_mappings json: {e}")))?;
-        let channel_type = channel_type_from_str(&row.channel_type)
-            .ok_or_else(|| bad_row(&format!("unknown channel_type: {}", row.channel_type)))?;
+            .map_err(|e| bad_row("channel", &format!("invalid model_mappings json: {e}")))?;
+        let channel_type = ChannelType::from_str(&row.channel_type)
+            .map_err(|e| bad_row("channel", &e.to_string()))?;
         Ok(Channel {
-            id: Uuid::from_str(&row.id).map_err(|e| bad_row(&format!("invalid id: {e}")))?,
+            id: Uuid::from_str(&row.id)
+                .map_err(|e| bad_row("channel", &format!("invalid id: {e}")))?,
             name: row.name,
             channel_type,
             base_url: row.base_url,
@@ -144,54 +145,20 @@ impl TryFrom<ChannelDb> for Channel {
             weight: row.weight,
             model_mappings,
             enabled: row.enabled,
-            last_test_at: row.last_test_at.as_deref().map(parse_utc).transpose()?,
+            last_test_at: row
+                .last_test_at
+                .as_deref()
+                .map(|s| parse_utc("channel", s))
+                .transpose()?,
             last_test_ok: row.last_test_ok,
-            created_at: parse_utc(&row.created_at)?,
-            updated_at: parse_utc(&row.updated_at)?,
+            created_at: parse_utc("channel", &row.created_at)?,
+            updated_at: parse_utc("channel", &row.updated_at)?,
         })
     }
 }
 
-/// Channel type ↔ stored string (consistent with the comment-enumerated values in `migrations/001_init.sql`).
-fn channel_type_to_str(t: ChannelType) -> &'static str {
-    match t {
-        ChannelType::OpenAi => "openai",
-        ChannelType::DeepSeek => "deepseek",
-        ChannelType::Custom => "custom",
-        ChannelType::Claude => "claude",
-        ChannelType::Gemini => "gemini",
-    }
-}
-
-fn channel_type_from_str(s: &str) -> Option<ChannelType> {
-    match s {
-        "openai" => Some(ChannelType::OpenAi),
-        "deepseek" => Some(ChannelType::DeepSeek),
-        "custom" => Some(ChannelType::Custom),
-        "claude" => Some(ChannelType::Claude),
-        "gemini" => Some(ChannelType::Gemini),
-        _ => None,
-    }
-}
-
-/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
-fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| bad_row(&format!("invalid timestamp {s:?}: {e}")))
-}
-
-fn db_err(e: sqlx::Error) -> RepositoryError {
-    RepositoryError::Database(e.to_string())
-}
-
 fn json_err(e: serde_json::Error) -> RepositoryError {
     RepositoryError::Database(format!("json encode error: {e}"))
-}
-
-/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
-fn bad_row(reason: &str) -> RepositoryError {
-    RepositoryError::Database(format!("invalid channel row: {reason}"))
 }
 
 #[cfg(test)]
@@ -199,6 +166,7 @@ mod tests {
     use super::*;
     use crate::domain::channel::{Channel, ModelMapping};
     use crate::infrastructure::sqlite::init_pool;
+    use sqlx::Row;
 
     async fn new_repo() -> SqliteChannelRepository {
         SqliteChannelRepository::new(init_pool("sqlite::memory:").await.expect("init pool"))
@@ -322,5 +290,54 @@ mod tests {
                 .expect("found");
             assert_eq!(found.channel_type, t);
         }
+    }
+
+    #[tokio::test]
+    async fn save_writes_fixed_width_utc_timestamps() {
+        let repo = new_repo().await;
+        let channel = sample();
+        repo.save(&channel).await.expect("save");
+
+        let row =
+            sqlx::query("SELECT created_at, updated_at, last_test_at FROM channels WHERE id = ?")
+                .bind(channel.id.to_string())
+                .fetch_one(&repo.pool)
+                .await
+                .expect("query row");
+        let created_at: String = row.get("created_at");
+        let updated_at: String = row.get("updated_at");
+        let last_test_at: Option<String> = row.get("last_test_at");
+
+        assert_eq!(created_at.len(), "2026-01-01T00:00:00.000000000Z".len());
+        assert!(created_at.ends_with('Z'));
+        assert_eq!(updated_at.len(), "2026-01-01T00:00:00.000000000Z".len());
+        if let Some(last_test_at) = last_test_at {
+            assert_eq!(last_test_at.len(), "2026-01-01T00:00:00.000000000Z".len());
+        }
+    }
+
+    #[tokio::test]
+    async fn old_variable_precision_timestamps_remain_readable() {
+        let repo = new_repo().await;
+        let channel = sample();
+        repo.save(&channel).await.expect("save");
+        sqlx::query("UPDATE channels SET created_at = ?, updated_at = ? WHERE id = ?")
+            .bind("2026-01-01T00:00:00Z")
+            .bind("2026-01-01T00:00:00.123Z")
+            .bind(channel.id.to_string())
+            .execute(&repo.pool)
+            .await
+            .expect("update timestamps");
+
+        let found = repo
+            .find_by_id(channel.id)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(found.created_at.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(
+            found.updated_at.to_rfc3339(),
+            "2026-01-01T00:00:00.123+00:00"
+        );
     }
 }

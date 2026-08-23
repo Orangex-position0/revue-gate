@@ -19,8 +19,8 @@ use interface::commands::api_key::{
     create_api_key, delete_api_key, list_api_keys, set_api_key_enabled, update_api_key,
 };
 use interface::commands::channel::{
-    create_channel, delete_channel, list_channels, set_channel_enabled, test_channel,
-    update_channel,
+    create_channel, delete_channel, fetch_channel_models, list_channels, set_channel_enabled,
+    test_channel, update_channel,
 };
 use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, list_logs};
 use interface::commands::server::{
@@ -147,6 +147,7 @@ pub fn run() {
             delete_channel,
             set_channel_enabled,
             test_channel,
+            fetch_channel_models,
             list_api_keys,
             create_api_key,
             update_api_key,

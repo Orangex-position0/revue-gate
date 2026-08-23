@@ -12,7 +12,8 @@ use crate::infrastructure::providers::adaptor_for;
 use crate::infrastructure::sqlite::channel::SqliteChannelRepository;
 use crate::usecases::channel::{
     ChannelInput, ChannelTestResult, CreateChannelUsecase, DeleteChannelUsecase,
-    ListChannelsUsecase, SetChannelEnabledUsecase, TestChannelUsecase, UpdateChannelUsecase,
+    FetchChannelModelsUsecase, ListChannelsUsecase, SetChannelEnabledUsecase, TestChannelUsecase,
+    UpdateChannelUsecase,
 };
 
 /// List all channels (sorted by priority ascending; upstream keys masked).
@@ -100,6 +101,26 @@ pub async fn test_channel(
     let adaptor = adaptor_for(channel.channel_type);
     TestChannelUsecase
         .execute(&*repo, id, &*adaptor)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch provider-reported models for the current channel form. In edit mode, `id` lets the use case reuse the
+/// stored upstream key when the form leaves apiKey blank.
+#[tauri::command]
+pub async fn fetch_channel_models(
+    repo: State<'_, SqliteChannelRepository>,
+    id: Option<String>,
+    input: ChannelInput,
+) -> Result<Vec<String>, String> {
+    let id = id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let adaptor = adaptor_for(input.channel_type);
+    FetchChannelModelsUsecase
+        .execute(&*repo, id, input, &*adaptor)
         .await
         .map_err(|e| e.to_string())
 }

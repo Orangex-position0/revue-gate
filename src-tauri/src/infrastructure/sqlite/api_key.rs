@@ -6,13 +6,13 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
 use crate::domain::error::RepositoryError;
+use crate::infrastructure::sqlite::{bad_row, db_err, fmt_utc, parse_utc};
 
 /// Row mapping for the API key table: one-to-one with the api_keys columns in `migrations/001_init.sql`.
 /// INTEGER columns are read as i64, then converted to the domain layer's u64 via `TryFrom`.
@@ -89,9 +89,9 @@ impl ApiKeyRepository for SqliteApiKeyRepository {
             .limit
             .map(i64::try_from)
             .transpose()
-            .map_err(|_| bad_row("quota_limit exceeds i64 range"))?;
+            .map_err(|_| bad_row("api_key", "quota_limit exceeds i64 range"))?;
         let quota_used = i64::try_from(api_key.quota.used)
-            .map_err(|_| bad_row("quota_used exceeds i64 range"))?;
+            .map_err(|_| bad_row("api_key", "quota_used exceeds i64 range"))?;
         sqlx::query(
             "INSERT INTO api_keys (id, name, key, enabled, quota_limit, quota_used, \
                 created_at, updated_at) \
@@ -107,8 +107,8 @@ impl ApiKeyRepository for SqliteApiKeyRepository {
         .bind(api_key.enabled)
         .bind(quota_limit)
         .bind(quota_used)
-        .bind(api_key.created_at.to_rfc3339())
-        .bind(api_key.updated_at.to_rfc3339())
+        .bind(fmt_utc(api_key.created_at))
+        .bind(fmt_utc(api_key.updated_at))
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -134,7 +134,8 @@ impl TryFrom<ApiKeyDb> for ApiKey {
 
     fn try_from(row: ApiKeyDb) -> Result<Self, Self::Error> {
         Ok(ApiKey {
-            id: Uuid::from_str(&row.id).map_err(|e| bad_row(&format!("invalid id: {e}")))?,
+            id: Uuid::from_str(&row.id)
+                .map_err(|e| bad_row("api_key", &format!("invalid id: {e}")))?,
             name: row.name,
             key: row.key,
             enabled: row.enabled,
@@ -145,31 +146,15 @@ impl TryFrom<ApiKeyDb> for ApiKey {
                     .transpose()?,
                 used: i64_to_u64(row.quota_used, "quota_used")?,
             },
-            created_at: parse_utc(&row.created_at)?,
-            updated_at: parse_utc(&row.updated_at)?,
+            created_at: parse_utc("api_key", &row.created_at)?,
+            updated_at: parse_utc("api_key", &row.updated_at)?,
         })
     }
 }
 
 /// Converts a stored signed i64 to the domain layer's u64 (negative values indicate corrupted row data).
 fn i64_to_u64(value: i64, column: &str) -> Result<u64, RepositoryError> {
-    u64::try_from(value).map_err(|_| bad_row(&format!("{column} out of range for u64")))
-}
-
-/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
-fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| bad_row(&format!("invalid timestamp {s:?}: {e}")))
-}
-
-fn db_err(e: sqlx::Error) -> RepositoryError {
-    RepositoryError::Database(e.to_string())
-}
-
-/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
-fn bad_row(reason: &str) -> RepositoryError {
-    RepositoryError::Database(format!("invalid api_key row: {reason}"))
+    u64::try_from(value).map_err(|_| bad_row("api_key", &format!("{column} out of range for u64")))
 }
 
 #[cfg(test)]
@@ -177,6 +162,7 @@ mod tests {
     use super::*;
     use crate::domain::api_key::Quota;
     use crate::infrastructure::sqlite::init_pool;
+    use sqlx::Row;
 
     async fn new_repo() -> SqliteApiKeyRepository {
         SqliteApiKeyRepository::new(init_pool("sqlite::memory:").await.expect("init pool"))
@@ -299,5 +285,49 @@ mod tests {
             .expect("find")
             .expect("found");
         assert_eq!(found.quota.limit, None);
+    }
+
+    #[tokio::test]
+    async fn save_writes_fixed_width_utc_timestamps() {
+        let repo = new_repo().await;
+        let api_key = crate::test_support::sample_api_key();
+        repo.save(&api_key).await.expect("save");
+
+        let row = sqlx::query("SELECT created_at, updated_at FROM api_keys WHERE id = ?")
+            .bind(api_key.id.to_string())
+            .fetch_one(&repo.pool)
+            .await
+            .expect("query row");
+        let created_at: String = row.get("created_at");
+        let updated_at: String = row.get("updated_at");
+
+        assert_eq!(created_at.len(), "2026-01-01T00:00:00.000000000Z".len());
+        assert!(created_at.ends_with('Z'));
+        assert_eq!(updated_at.len(), "2026-01-01T00:00:00.000000000Z".len());
+    }
+
+    #[tokio::test]
+    async fn old_variable_precision_timestamps_remain_readable() {
+        let repo = new_repo().await;
+        let api_key = crate::test_support::sample_api_key();
+        repo.save(&api_key).await.expect("save");
+        sqlx::query("UPDATE api_keys SET created_at = ?, updated_at = ? WHERE id = ?")
+            .bind("2026-01-01T00:00:00Z")
+            .bind("2026-01-01T00:00:00.123Z")
+            .bind(api_key.id.to_string())
+            .execute(&repo.pool)
+            .await
+            .expect("update timestamps");
+
+        let found = repo
+            .find_by_id(api_key.id)
+            .await
+            .expect("find")
+            .expect("found");
+        assert_eq!(found.created_at.to_rfc3339(), "2026-01-01T00:00:00+00:00");
+        assert_eq!(
+            found.updated_at.to_rfc3339(),
+            "2026-01-01T00:00:00.123+00:00"
+        );
     }
 }

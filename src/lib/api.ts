@@ -54,6 +54,9 @@ export const channelApi = {
     invoke<Channel>("set_channel_enabled", { id, enabled }),
   /** Channel connectivity test: calls the upstream model-list endpoint, returns the result, and persists it (lastTestAt / lastTestOk). */
   test: (id: string) => invoke<ChannelTestResult>("test_channel", { id }),
+  /** Manually fetch provider-reported models for the current form; failures do not mutate the saved channel. */
+  fetchModels: (id: string | null, input: ChannelInput) =>
+    invoke<string[]>("fetch_channel_models", { id, input }),
 };
 
 export const apiKeyApi = {

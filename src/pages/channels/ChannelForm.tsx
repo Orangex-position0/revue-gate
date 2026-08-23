@@ -2,8 +2,8 @@
 // apiKey is not pre-filled on edit; empty = keep the original key (backend update semantics, see usecases/channel.rs).
 // The model list is entered as comma-separated text; model mappings use a row editor with add/remove. On submit, calls back onSaved(channel).
 import { useState, type FormEvent } from "react";
-import { Plus, Trash2, X } from "lucide-react";
-import { CHANNEL_TYPE_LABELS } from "@/lib/constants";
+import { Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { CHANNEL_TYPE_LABELS, DEFAULT_CHANNEL_MODELS } from "@/lib/constants";
 import { channelApi, invokeErrorMessage } from "@/lib/api";
 import type { Channel, ChannelInput, ChannelType, ModelMapping } from "@/types";
 
@@ -36,7 +36,9 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
   );
   const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [models, setModels] = useState(initial?.models.join(", ") ?? "");
+  const [models, setModels] = useState(
+    initial?.models.join(", ") ?? DEFAULT_CHANNEL_MODELS.openai.join(", "),
+  );
   const [priority, setPriority] = useState(initial ? String(initial.priority) : "0");
   const [weight, setWeight] = useState(initial ? String(initial.weight) : "1");
   const [mappings, setMappings] = useState<MappingRow[]>(
@@ -44,26 +46,12 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
   );
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [saving, setSaving] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
 
-  function updateMapping(id: string, field: keyof ModelMapping, value: string) {
-    setMappings((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, [field]: value } : m)),
-    );
-  }
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!name.trim()) {
-      setSubmitError("名称不能为空");
-      return;
-    }
-    const weightNum = Number(weight);
-    if (Number.isFinite(weightNum) && weightNum < 0) {
-      setSubmitError("权重不能为负数");
-      return;
-    }
-    const input: ChannelInput = {
+  function buildInput(): ChannelInput {
+    return {
       name: name.trim(),
       channelType,
       baseUrl: baseUrl.trim() || null,
@@ -82,6 +70,26 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
         })),
       enabled,
     };
+  }
+
+  function updateMapping(id: string, field: keyof ModelMapping, value: string) {
+    setMappings((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, [field]: value } : m)),
+    );
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim()) {
+      setSubmitError("名称不能为空");
+      return;
+    }
+    const weightNum = Number(weight);
+    if (Number.isFinite(weightNum) && weightNum < 0) {
+      setSubmitError("权重不能为负数");
+      return;
+    }
+    const input = buildInput();
     setSaving(true);
     try {
       const saved = initial
@@ -93,6 +101,25 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleFetchModels() {
+    setFetchingModels(true);
+    setModelFetchError(null);
+    try {
+      const fetched = await channelApi.fetchModels(initial?.id ?? null, buildInput());
+      setModels(fetched.join(", "));
+    } catch (error) {
+      setModelFetchError(invokeErrorMessage(error));
+    } finally {
+      setFetchingModels(false);
+    }
+  }
+
+  function handleChannelTypeChange(next: ChannelType) {
+    setChannelType(next);
+    setModels(DEFAULT_CHANNEL_MODELS[next].join(", "));
+    setModelFetchError(null);
   }
 
   return (
@@ -143,7 +170,7 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
               id="channel-type"
               className={inputCls}
               value={channelType}
-              onChange={(e) => setChannelType(e.target.value as ChannelType)}
+              onChange={(e) => handleChannelTypeChange(e.target.value as ChannelType)}
             >
               {(Object.keys(CHANNEL_TYPE_LABELS) as ChannelType[]).map((t) => (
                 <option key={t} value={t}>
@@ -182,9 +209,24 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
           </div>
 
           <div>
-            <label className={labelCls} htmlFor="channel-models">
-              模型列表（逗号分隔）
-            </label>
+            <div className="mb-1 flex items-center justify-between gap-3">
+              <label className={labelCls} htmlFor="channel-models">
+                模型列表（逗号分隔）
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleFetchModels()}
+                disabled={fetchingModels}
+                className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
+              >
+                {fetchingModels ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                获取
+              </button>
+            </div>
             <input
               id="channel-models"
               className={inputCls}
@@ -192,6 +234,11 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
               onChange={(e) => setModels(e.target.value)}
               placeholder="gpt-4o, gpt-4o-mini"
             />
+            {modelFetchError && (
+              <p className="mt-1 text-xs text-danger" role="alert">
+                {modelFetchError}
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">

@@ -9,7 +9,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota};
+use crate::domain::api_key::{ApiKey, ApiKeyRepository, Quota, generate_local_key};
 use crate::domain::error::RepositoryError;
 
 /// API key use case layer error.
@@ -46,7 +46,7 @@ impl CreateApiKeyUsecase {
         let api_key = ApiKey {
             id: Uuid::now_v7(),
             name: input.name,
-            key: generate_key(),
+            key: generate_local_key(),
             enabled: input.enabled,
             quota: Quota {
                 limit: input.quota_limit,
@@ -143,14 +143,6 @@ fn normalize(input: ApiKeyInput) -> Result<ApiKeyInput, ApiKeyError> {
         name: name.to_string(),
         ..input
     })
-}
-
-/// Generate `sk-revue-<16 random hex>`: 8 bytes from the OS-level random source (getrandom).
-fn generate_key() -> String {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes).expect("OS random number generator is available");
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("sk-revue-{hex}")
 }
 
 /// Map a repository error to a use case error: `NotFound` is semantically the same as the use case's `NotFound`.

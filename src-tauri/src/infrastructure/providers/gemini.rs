@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::domain::channel::Channel;
 use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
-    TestResult, Usage,
+    TestResult, TokenUsage,
 };
 use crate::infrastructure::providers::{
     chunk_event, extract_text_content, finish_event, require_api_key, resolve_base_url,
@@ -277,7 +277,7 @@ fn gemini_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError> {
 }
 
 /// Extracts usage from a Gemini response (`promptTokenCount` → prompt, `candidatesTokenCount` → completion).
-fn usage_from_gemini(resp: &Value) -> Option<Usage> {
+fn usage_from_gemini(resp: &Value) -> Option<TokenUsage> {
     let usage = resp.get("usageMetadata")?;
     let prompt = usage.get("promptTokenCount").and_then(Value::as_u64);
     let completion = usage.get("candidatesTokenCount").and_then(Value::as_u64);
@@ -286,7 +286,7 @@ fn usage_from_gemini(resp: &Value) -> Option<Usage> {
         return None;
     }
     Some(
-        Usage {
+        TokenUsage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["content"], "gemini reply");
         assert_eq!(
             resp.usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(5),
                 completion_tokens: Some(9),
                 total_tokens: Some(14),
@@ -570,7 +570,7 @@ mod tests {
         );
         assert_eq!(
             usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(2),
                 completion_tokens: Some(4),
                 total_tokens: Some(6),

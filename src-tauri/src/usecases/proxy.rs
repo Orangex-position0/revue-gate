@@ -24,7 +24,8 @@ use crate::domain::channel::{Channel, ChannelRepository};
 use crate::domain::dispatcher::ChannelSelector;
 use crate::domain::error::RepositoryError;
 use crate::domain::provider::{
-    BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent, Usage,
+    BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
+    TokenUsage,
 };
 use crate::domain::request_log::{RequestLog, RequestLogRepository};
 use crate::domain::security_audit::{
@@ -336,7 +337,7 @@ fn is_retryable(status: u16) -> bool {
 async fn accumulate_usage(
     api_key_repo: &dyn ApiKeyRepository,
     api_key_id: Uuid,
-    usage: Option<Usage>,
+    usage: Option<TokenUsage>,
 ) -> Result<(), ProxyError> {
     let Some(usage) = usage else {
         return Ok(());
@@ -419,7 +420,7 @@ async fn record_policy_blocked(log_repo: &dyn RequestLogRepository, ctx: &Attemp
 fn build_log(
     ctx: &AttemptContext,
     status_code: u16,
-    usage: Option<Usage>,
+    usage: Option<TokenUsage>,
     error_message: Option<String>,
 ) -> RequestLog {
     let audit_report = ctx.audit_report.clone();
@@ -455,7 +456,7 @@ fn build_log(
 struct StreamState {
     inner: BoxStream<'static, Result<StreamEvent, ProviderError>>,
     done: bool,
-    usage: Usage,
+    usage: TokenUsage,
 }
 
 /// Wrap the upstream stream: aggregate usage frame by frame; on normal end (None) bill + write a success log,
@@ -472,7 +473,7 @@ fn wrap_stream_bookkeeping(
         StreamState {
             inner,
             done: false,
-            usage: Usage::default(),
+            usage: TokenUsage::default(),
         },
         move |mut state: StreamState| {
             let api_key_repo = Arc::clone(&api_key_repo);
@@ -536,7 +537,7 @@ fn wrap_stream_bookkeeping(
 mod tests {
     use super::*;
     use crate::domain::channel::ModelMapping;
-    use crate::domain::provider::Usage;
+    use crate::domain::provider::TokenUsage;
     use crate::domain::security_audit::{AuditAction, AuditMode, AuditSettings, RiskLevel};
     use crate::domain::settings::RetryPolicy;
     use crate::test_support::{
@@ -545,15 +546,15 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    fn usage(prompt: u64, completion: u64, total: u64) -> Usage {
-        Usage {
+    fn usage(prompt: u64, completion: u64, total: u64) -> TokenUsage {
+        TokenUsage {
             prompt_tokens: Some(prompt),
             completion_tokens: Some(completion),
             total_tokens: Some(total),
         }
     }
 
-    fn ok_response(status: u16, usage: Option<Usage>) -> ProviderResponse {
+    fn ok_response(status: u16, usage: Option<TokenUsage>) -> ProviderResponse {
         ProviderResponse {
             status_code: status,
             body: b"{\"ok\":true}".to_vec(),

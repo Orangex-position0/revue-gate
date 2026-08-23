@@ -5,10 +5,13 @@ pub mod api_key;
 pub mod channel;
 pub mod request_log;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use std::str::FromStr;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+use crate::domain::error::RepositoryError;
 
 /// Infrastructure layer error: connection/query and migration failures are unified here.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +33,24 @@ pub async fn init_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     Ok(pool)
+}
+
+pub(crate) fn fmt_utc(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+pub(crate) fn parse_utc(row_kind: &str, s: &str) -> Result<DateTime<Utc>, RepositoryError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| bad_row(row_kind, &format!("invalid timestamp {s:?}: {e}")))
+}
+
+pub(crate) fn db_err(e: sqlx::Error) -> RepositoryError {
+    RepositoryError::Database(e.to_string())
+}
+
+pub(crate) fn bad_row(row_kind: &str, reason: &str) -> RepositoryError {
+    RepositoryError::Database(format!("invalid {row_kind} row: {reason}"))
 }
 
 #[cfg(test)]

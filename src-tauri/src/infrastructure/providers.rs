@@ -12,7 +12,7 @@ pub(crate) mod test_util;
 use serde_json::{Value, json};
 
 use crate::domain::channel::ChannelType;
-use crate::domain::provider::{ProviderAdaptor, ProviderError, StreamEvent, Usage};
+use crate::domain::provider::{ProviderAdaptor, ProviderError, StreamEvent, TokenUsage};
 
 /// Returns the adapter instance for the channel type (Box<dyn> hides the protocol differences).
 pub fn adaptor_for(channel_type: ChannelType) -> Box<dyn ProviderAdaptor> {
@@ -79,7 +79,7 @@ pub(super) fn extract_text_content(content: Option<&Value>) -> Option<String> {
 
 /// Builds a JSON object from the `usage` value object (OpenAI-compatible usage field), so streaming
 /// chunks can carry usage.
-pub(super) fn usage_to_json(u: Usage) -> Value {
+pub(super) fn usage_to_json(u: TokenUsage) -> Value {
     let mut v = json!({});
     if let Some(p) = u.prompt_tokens {
         v["prompt_tokens"] = json!(p);
@@ -100,7 +100,7 @@ pub(super) fn chunk_event(
     model: &str,
     created: i64,
     content: &str,
-    usage: Option<Usage>,
+    usage: Option<TokenUsage>,
 ) -> StreamEvent {
     let mut chunk = json!({
         "id": id,

@@ -13,19 +13,19 @@ use crate::domain::channel::{Channel, ChannelType};
 /// usage: token statistics for one upstream call. Field names differ per provider (OpenAI `usage` / Claude `input|output_tokens`
 /// / Gemini `usageMetadata`); adapters normalize them into this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Usage {
+pub struct TokenUsage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
 
-impl Usage {
+impl TokenUsage {
     /// Derives total from prompt + completion when total is missing (some providers do not return total).
-    pub fn normalized(self) -> Usage {
+    pub fn normalized(self) -> TokenUsage {
         let total_tokens = self.total_tokens.or_else(|| {
             Some(self.prompt_tokens.unwrap_or(0) + self.completion_tokens.unwrap_or(0))
         });
-        Usage {
+        TokenUsage {
             total_tokens,
             ..self
         }
@@ -33,8 +33,8 @@ impl Usage {
 
     /// Merge two usage values: each field accumulates as "sum when both sides have it, otherwise keep the side that has it" (saturating addition prevents overflow).
     /// Used for per-frame usage aggregation of streaming responses (OpenAI-compatible streams usually carry usage only in the last frame, so the aggregate equals taking the last frame).
-    pub fn accumulate(self, other: Usage) -> Usage {
-        Usage {
+    pub fn accumulate(self, other: TokenUsage) -> TokenUsage {
+        TokenUsage {
             prompt_tokens: opt_add(self.prompt_tokens, other.prompt_tokens),
             completion_tokens: opt_add(self.completion_tokens, other.completion_tokens),
             total_tokens: opt_add(self.total_tokens, other.total_tokens),
@@ -71,15 +71,15 @@ pub struct ProviderResponse {
     pub status_code: u16,
     /// Converted / relayed response body.
     pub body: Vec<u8>,
-    /// Usage parsed from the response (None on error responses or parse failures).
-    pub usage: Option<Usage>,
+    /// TokenUsage parsed from the response (None on error responses or parse failures).
+    pub usage: Option<TokenUsage>,
 }
 
 /// Streaming response event: `data` is the OpenAI-compatible SSE bytes relayed to downstream, `usage` is the usage carried by this frame (if any).
 #[derive(Debug, Clone)]
 pub struct StreamEvent {
     pub data: Vec<u8>,
-    pub usage: Option<Usage>,
+    pub usage: Option<TokenUsage>,
 }
 
 /// Connectivity test result: success / failure, latency, failure reason (adapters probe with their respective model-list endpoints).
@@ -96,6 +96,8 @@ pub struct TestResult {
 pub enum ProviderError {
     #[error("provider not configured: {0}")]
     NotConfigured(String),
+    #[error("provider capability unsupported: {0}")]
+    Unsupported(String),
     #[error("request error: {0}")]
     Request(String),
     #[error("invalid upstream response: {0}")]
@@ -109,6 +111,12 @@ pub trait ProviderAdaptor: Send + Sync {
     fn channel_type(&self) -> ChannelType;
     /// Default model list when creating a channel (for frontend form prefill).
     fn default_models(&self) -> Vec<String>;
+    /// Provider-reported model list. Unsupported providers must say so explicitly; callers keep static defaults.
+    async fn fetch_models(&self, _channel: &Channel) -> Result<Vec<String>, ProviderError> {
+        Err(ProviderError::Unsupported(
+            "model discovery is not supported".into(),
+        ))
+    }
     /// Default Base URL; Custom returns None with no default (the channel must configure it explicitly).
     fn default_base_url(&self) -> Option<&'static str>;
     /// Connectivity test: probes the model-list endpoint of each provider, returns latency and failure reason.
@@ -131,8 +139,8 @@ pub trait ProviderAdaptor: Send + Sync {
 mod tests {
     use super::*;
 
-    fn usage(prompt: Option<u64>, completion: Option<u64>, total: Option<u64>) -> Usage {
-        Usage {
+    fn usage(prompt: Option<u64>, completion: Option<u64>, total: Option<u64>) -> TokenUsage {
+        TokenUsage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,

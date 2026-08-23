@@ -8,6 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::domain::error::RepositoryError;
@@ -22,6 +23,37 @@ pub enum ChannelType {
     Custom,
     Claude,
     Gemini,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown channel type: {0}")]
+pub struct ParseChannelTypeError(String);
+
+impl std::fmt::Display for ChannelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ChannelType::OpenAi => "openai",
+            ChannelType::DeepSeek => "deepseek",
+            ChannelType::Custom => "custom",
+            ChannelType::Claude => "claude",
+            ChannelType::Gemini => "gemini",
+        })
+    }
+}
+
+impl FromStr for ChannelType {
+    type Err = ParseChannelTypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "openai" => Ok(ChannelType::OpenAi),
+            "deepseek" => Ok(ChannelType::DeepSeek),
+            "custom" => Ok(ChannelType::Custom),
+            "claude" => Ok(ChannelType::Claude),
+            "gemini" => Ok(ChannelType::Gemini),
+            _ => Err(ParseChannelTypeError(s.to_string())),
+        }
+    }
 }
 
 /// Model mapping value object: unified client model name ↔ actual upstream model name; passthrough when unmapped.
@@ -76,4 +108,28 @@ pub trait ChannelRepository: Send + Sync {
     async fn save(&self, channel: &Channel) -> Result<(), RepositoryError>;
     /// Delete a channel by id; returns `RepositoryError::NotFound` when not found.
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_type_display_uses_persisted_domain_strings() {
+        assert_eq!(ChannelType::OpenAi.to_string(), "openai");
+        assert_eq!(ChannelType::DeepSeek.to_string(), "deepseek");
+        assert_eq!(ChannelType::Custom.to_string(), "custom");
+        assert_eq!(ChannelType::Claude.to_string(), "claude");
+        assert_eq!(ChannelType::Gemini.to_string(), "gemini");
+    }
+
+    #[test]
+    fn channel_type_from_str_accepts_known_values_and_rejects_unknown() {
+        assert_eq!("openai".parse::<ChannelType>(), Ok(ChannelType::OpenAi));
+        assert_eq!("deepseek".parse::<ChannelType>(), Ok(ChannelType::DeepSeek));
+        assert_eq!("custom".parse::<ChannelType>(), Ok(ChannelType::Custom));
+        assert_eq!("claude".parse::<ChannelType>(), Ok(ChannelType::Claude));
+        assert_eq!("gemini".parse::<ChannelType>(), Ok(ChannelType::Gemini));
+        assert!("mystery".parse::<ChannelType>().is_err());
+    }
 }

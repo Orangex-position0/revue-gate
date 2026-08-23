@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::domain::channel::Channel;
 use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
-    TestResult, Usage,
+    TestResult, TokenUsage,
 };
 use crate::infrastructure::providers::{
     chunk_event, extract_text_content, finish_event, require_api_key, resolve_base_url,
@@ -268,7 +268,7 @@ fn anthropic_to_openai(resp: &Value, model: &str) -> Result<Value, ProviderError
 }
 
 /// Extracts usage from an Anthropic response (`input_tokens` → prompt, `output_tokens` → completion).
-fn usage_from_anthropic(resp: &Value) -> Option<Usage> {
+fn usage_from_anthropic(resp: &Value) -> Option<TokenUsage> {
     let usage = resp.get("usage")?;
     let prompt = usage.get("input_tokens").and_then(Value::as_u64);
     let completion = usage.get("output_tokens").and_then(Value::as_u64);
@@ -276,7 +276,7 @@ fn usage_from_anthropic(resp: &Value) -> Option<Usage> {
         return None;
     }
     Some(
-        Usage {
+        TokenUsage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: None,
@@ -435,7 +435,7 @@ fn process_anthropic_line(
             let output = value
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64)?;
-            let usage = Usage {
+            let usage = TokenUsage {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: Some(output),
                 total_tokens: None,
@@ -562,7 +562,7 @@ mod tests {
         );
         assert_eq!(
             resp.usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(12),
                 completion_tokens: Some(4),
                 total_tokens: Some(16),
@@ -640,7 +640,7 @@ mod tests {
         );
         assert_eq!(
             usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: None,
                 completion_tokens: Some(15),
                 total_tokens: Some(15),
@@ -736,7 +736,7 @@ mod tests {
         );
         assert_eq!(
             usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(9),
                 completion_tokens: Some(256),
                 total_tokens: Some(265),

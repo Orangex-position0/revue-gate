@@ -324,6 +324,7 @@ pub struct MockProviderAdaptor {
     result: TestResult,
     /// Some → `test()` returns a config error (simulates a missing api_key / base_url).
     error: Option<String>,
+    fetch_models: Result<Vec<String>, ProviderError>,
 }
 
 impl MockProviderAdaptor {
@@ -332,6 +333,9 @@ impl MockProviderAdaptor {
         Self {
             result,
             error: None,
+            fetch_models: Err(ProviderError::Unsupported(
+                "model discovery is not supported".into(),
+            )),
         }
     }
 
@@ -344,6 +348,21 @@ impl MockProviderAdaptor {
                 error: None,
             },
             error: Some(reason.to_string()),
+            fetch_models: Err(ProviderError::Unsupported(
+                "model discovery is not supported".into(),
+            )),
+        }
+    }
+
+    pub fn with_models(models: Vec<String>) -> Self {
+        Self {
+            result: TestResult {
+                ok: true,
+                latency_ms: 0,
+                error: None,
+            },
+            error: None,
+            fetch_models: Ok(models),
         }
     }
 }
@@ -367,6 +386,10 @@ impl ProviderAdaptor for MockProviderAdaptor {
             Some(reason) => Err(ProviderError::NotConfigured(reason.clone())),
             None => Ok(self.result.clone()),
         }
+    }
+
+    async fn fetch_models(&self, _channel: &Channel) -> Result<Vec<String>, ProviderError> {
+        self.fetch_models.clone()
     }
 
     async fn forward(

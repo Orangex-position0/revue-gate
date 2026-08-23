@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::channel::{Channel, ChannelRepository, ChannelType, ModelMapping};
 use crate::domain::error::RepositoryError;
-use crate::domain::provider::ProviderAdaptor;
+use crate::domain::provider::{ProviderAdaptor, ProviderError};
 
 /// Channel use case layer error.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +20,8 @@ pub enum ChannelError {
     NotFound,
     #[error("invalid channel: {0}")]
     Validation(String),
+    #[error("provider error: {0}")]
+    Provider(#[from] ProviderError),
     #[error("channel repository error: {0}")]
     Repository(#[from] RepositoryError),
 }
@@ -184,6 +186,33 @@ impl TestChannelUsecase {
     }
 }
 
+pub struct FetchChannelModelsUsecase;
+impl FetchChannelModelsUsecase {
+    pub async fn execute(
+        &self,
+        repo: &dyn ChannelRepository,
+        id: Option<Uuid>,
+        input: ChannelInput,
+        adaptor: &dyn ProviderAdaptor,
+    ) -> Result<Vec<String>, ChannelError> {
+        let existing = match id {
+            Some(id) => Some(repo.find_by_id(id).await?.ok_or(ChannelError::NotFound)?),
+            None => None,
+        };
+        let mut channel = build_channel_for_model_discovery(input)?;
+        if channel.api_key.is_none() {
+            channel.api_key = existing.as_ref().and_then(|c| c.api_key.clone());
+        }
+        if let Some(existing) = existing {
+            channel.id = existing.id;
+            channel.created_at = existing.created_at;
+            channel.last_test_at = existing.last_test_at;
+            channel.last_test_ok = existing.last_test_ok;
+        }
+        Ok(adaptor.fetch_models(&channel).await?)
+    }
+}
+
 /// Normalize input: trim the name (a blank name errors); empty / whitespace-only Base URL / API Key normalize to None, and non-blank values are also trimmed.
 fn normalize(input: ChannelInput) -> Result<ChannelInput, ChannelError> {
     let name = input.name.trim();
@@ -210,6 +239,27 @@ fn non_blank(value: Option<String>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn build_channel_for_model_discovery(input: ChannelInput) -> Result<Channel, ChannelError> {
+    let input = normalize(input)?;
+    let now = Utc::now();
+    Ok(Channel {
+        id: Uuid::now_v7(),
+        name: input.name,
+        channel_type: input.channel_type,
+        base_url: input.base_url,
+        api_key: input.api_key,
+        models: input.models,
+        priority: input.priority,
+        weight: input.weight,
+        model_mappings: input.model_mappings,
+        enabled: input.enabled,
+        last_test_at: None,
+        last_test_ok: None,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 /// Map a repository error to a use case error: `NotFound` is semantically the same as the use case's `NotFound`.
 fn map_repo_error(e: RepositoryError) -> ChannelError {
     match e {
@@ -221,7 +271,7 @@ fn map_repo_error(e: RepositoryError) -> ChannelError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::InMemoryChannelRepository;
+    use crate::test_support::{InMemoryChannelRepository, MockProviderAdaptor};
 
     /// Build a valid sample creation input.
     fn input(name: &str) -> ChannelInput {
@@ -454,8 +504,6 @@ mod tests {
         assert_eq!(all.len(), 2);
     }
 
-    use crate::test_support::MockProviderAdaptor;
-
     /// Connectivity test: a success result is echoed and persisted as last_test_ok=true.
     #[tokio::test]
     async fn test_channel_persists_success_result() {
@@ -563,6 +611,58 @@ mod tests {
                 .execute(&repo, Uuid::now_v7(), &adaptor)
                 .await,
             Err(ChannelError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_channel_models_returns_provider_reported_models() {
+        let repo = InMemoryChannelRepository::new();
+        let adaptor = MockProviderAdaptor::with_models(vec!["gpt-4o".into(), "gpt-4o-mini".into()]);
+
+        let models = FetchChannelModelsUsecase
+            .execute(&repo, None, input("draft"), &adaptor)
+            .await
+            .expect("fetch");
+
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_channel_models_keeps_existing_key_when_edit_input_is_blank() {
+        let repo = InMemoryChannelRepository::new();
+        let created = CreateChannelUsecase
+            .execute(&repo, input("openai-prod"))
+            .await
+            .expect("create");
+        let adaptor = MockProviderAdaptor::with_models(vec!["gpt-4o".into()]);
+        let mut update = input("openai-prod");
+        update.api_key = None;
+
+        let models = FetchChannelModelsUsecase
+            .execute(&repo, Some(created.id), update, &adaptor)
+            .await
+            .expect("fetch");
+
+        assert_eq!(models, vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_channel_models_reports_unsupported_provider() {
+        let repo = InMemoryChannelRepository::new();
+        let adaptor = MockProviderAdaptor::new(crate::domain::provider::TestResult {
+            ok: true,
+            latency_ms: 0,
+            error: None,
+        });
+
+        let err = FetchChannelModelsUsecase
+            .execute(&repo, None, input("draft"), &adaptor)
+            .await
+            .expect_err("unsupported");
+
+        assert!(matches!(
+            err,
+            ChannelError::Provider(ProviderError::Unsupported(_))
         ));
     }
 }

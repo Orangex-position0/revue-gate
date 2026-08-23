@@ -41,6 +41,14 @@ pub struct ApiKey {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Generate a Local API Key: `sk-revue-<16 random hex>`.
+pub fn generate_local_key() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("OS random number generator is available");
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("sk-revue-{hex}")
+}
+
 /// ApiKey repository trait: interface defined in the domain layer, sqlx implementation provided by infrastructure.
 #[async_trait::async_trait]
 pub trait ApiKeyRepository: Send + Sync {
@@ -54,4 +62,20 @@ pub trait ApiKeyRepository: Send + Sync {
     async fn save(&self, api_key: &ApiKey) -> Result<(), RepositoryError>;
     /// Delete a key by id.
     async fn delete(&self, id: Uuid) -> Result<(), RepositoryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_local_key_uses_public_domain_shape() {
+        let key = generate_local_key();
+        let Some(hex_part) = key.strip_prefix("sk-revue-") else {
+            panic!("key should start with sk-revue-: {key}");
+        };
+        assert_eq!(hex_part.len(), 16);
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(key.len(), 25);
+    }
 }

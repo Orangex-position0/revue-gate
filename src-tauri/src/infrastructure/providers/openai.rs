@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::domain::channel::{Channel, ChannelType};
 use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
-    TestResult, Usage,
+    TestResult, TokenUsage,
 };
 use crate::infrastructure::providers::{
     require_api_key, resolve_base_url, upstream_error_body, upstream_error_event,
@@ -62,6 +62,31 @@ impl ProviderAdaptor for OpenAiCompatibleAdaptor {
             // Custom has no defaults: the channel must explicitly configure a Base URL.
             _ => None,
         }
+    }
+
+    async fn fetch_models(&self, channel: &Channel) -> Result<Vec<String>, ProviderError> {
+        let base_url = resolve_base_url(channel, self.default_base_url())?;
+        let api_key = require_api_key(channel)?;
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(api_key)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Request(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ProviderError::Request(format!(
+                "model discovery failed with status {status}"
+            )));
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+        parse_model_list(&value)
     }
 
     /// Connectivity test: `GET {base_url}/models`, 2xx counts as success.
@@ -195,13 +220,13 @@ fn relay_with_usage(
 }
 
 /// Parses usage from a non-streaming response body (returns None on parse failure; the response is still relayed as-is).
-fn extract_usage_from_body(body: &[u8]) -> Option<Usage> {
+fn extract_usage_from_body(body: &[u8]) -> Option<TokenUsage> {
     let value: Value = serde_json::from_slice(body).ok()?;
     usage_from_value(&value)
 }
 
 /// Extracts an OpenAI-compatible `usage` object from any JSON value.
-fn usage_from_value(value: &Value) -> Option<Usage> {
+fn usage_from_value(value: &Value) -> Option<TokenUsage> {
     let usage = value.get("usage")?;
     let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
     let completion = usage.get("completion_tokens").and_then(Value::as_u64);
@@ -210,13 +235,31 @@ fn usage_from_value(value: &Value) -> Option<Usage> {
         return None;
     }
     Some(
-        Usage {
+        TokenUsage {
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
         }
         .normalized(),
     )
+}
+
+fn parse_model_list(value: &Value) -> Result<Vec<String>, ProviderError> {
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ProviderError::InvalidResponse("missing data array".into()))?;
+    let mut models = Vec::new();
+    for item in data {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ProviderError::InvalidResponse("model item missing id".into()))?;
+        if !models.iter().any(|m| m == id) {
+            models.push(id.to_string());
+        }
+    }
+    Ok(models)
 }
 
 /// Streaming usage scanner: accumulates incomplete lines, only used to parse usage, never modifying the relayed bytes.
@@ -232,7 +275,7 @@ impl SseUsageScanner {
     }
 
     /// Feeds a new chunk and returns usage parsed from complete `data:` lines within it (if any).
-    fn push(&mut self, chunk: &[u8]) -> Option<Usage> {
+    fn push(&mut self, chunk: &[u8]) -> Option<TokenUsage> {
         self.pending.extend_from_slice(chunk);
         let mut usage = None;
         let mut consumed = 0;
@@ -329,6 +372,113 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn fetch_models_reads_openai_compatible_model_ids() {
+        let router = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [
+                        {"id": "gpt-4o", "object": "model"},
+                        {"id": "gpt-4o-mini", "object": "model"},
+                        {"id": "gpt-4o", "object": "model"}
+                    ]
+                }))
+            }),
+        );
+        let (base, handle) = test_util::spawn(router).await;
+        let adaptor = OpenAiCompatibleAdaptor::new(ChannelType::OpenAi);
+        let channel = test_util::test_channel(ChannelType::OpenAi, &base);
+
+        let models = adaptor.fetch_models(&channel).await.expect("fetch models");
+
+        handle.abort();
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_models_rejects_malformed_model_list() {
+        let router = Router::new().route("/models", get(|| async { Json(json!({"data": [{}]})) }));
+        let (base, handle) = test_util::spawn(router).await;
+        let adaptor = OpenAiCompatibleAdaptor::new(ChannelType::OpenAi);
+        let channel = test_util::test_channel(ChannelType::OpenAi, &base);
+
+        let err = adaptor
+            .fetch_models(&channel)
+            .await
+            .expect_err("malformed response should fail");
+
+        handle.abort();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn deepseek_uses_openai_compatible_defaults() {
+        let adaptor = OpenAiCompatibleAdaptor::new(ChannelType::DeepSeek);
+
+        assert_eq!(adaptor.channel_type(), ChannelType::DeepSeek);
+        assert_eq!(
+            adaptor.default_base_url(),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert_eq!(
+            adaptor.default_models(),
+            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn deepseek_reuses_openai_compatible_forward_mapping() {
+        let received: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let probe = received.clone();
+        let router = Router::new().route(
+            "/chat/completions",
+            post(move |body: Json<Value>| async move {
+                *probe.lock().unwrap() = Some(body.0);
+                Json(json!({
+                    "id": "deepseek-chatcmpl",
+                    "object": "chat.completion",
+                    "created": 1700000000,
+                    "model": "deepseek-chat",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+                }))
+            }),
+        );
+        let (base, handle) = test_util::spawn(router).await;
+        let adaptor = OpenAiCompatibleAdaptor::new(ChannelType::DeepSeek);
+        let channel = test_util::test_channel(ChannelType::DeepSeek, &base);
+        let request = ChatRequest {
+            model: "deepseek-chat".to_string(),
+            stream: false,
+            body: json!({
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": "hi"}],
+            }),
+        };
+
+        let resp = adaptor.forward(&channel, &request).await.expect("forward");
+
+        handle.abort();
+        assert_eq!(*received.lock().unwrap(), Some(request.body));
+        assert_eq!(
+            resp.usage,
+            Some(TokenUsage {
+                prompt_tokens: Some(4),
+                completion_tokens: Some(6),
+                total_tokens: Some(10),
+            })
+        );
+        let body: Value = serde_json::from_slice(&resp.body).expect("json");
+        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(body["choices"][0]["message"]["content"], "hello");
+    }
+
     /// Non-streaming forward: the request body is relayed as-is; the response is relayed and usage is parsed.
     #[tokio::test]
     async fn forward_passes_body_and_parses_usage() {
@@ -360,7 +510,7 @@ mod tests {
         assert_eq!(*received.lock().unwrap(), Some(request.body));
         assert_eq!(
             resp.usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(5),
                 total_tokens: Some(15),
@@ -416,7 +566,7 @@ mod tests {
         assert_eq!(data, payload.as_bytes(), "bytes must be relayed unchanged");
         assert_eq!(
             usage,
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: Some(3),
                 completion_tokens: Some(2),
                 total_tokens: Some(5),
@@ -511,7 +661,7 @@ mod tests {
         assert_eq!(scanner.push(b"data: {\"us"), None);
         assert_eq!(
             scanner.push(b"age\":{\"total_tokens\":7}}\n\n"),
-            Some(Usage {
+            Some(TokenUsage {
                 prompt_tokens: None,
                 completion_tokens: None,
                 total_tokens: Some(7),

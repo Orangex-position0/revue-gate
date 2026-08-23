@@ -8,7 +8,7 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
@@ -17,6 +17,7 @@ use crate::domain::error::RepositoryError;
 use crate::domain::request_log::{LogPage, LogQuery, RequestLog, RequestLogRepository};
 use crate::domain::security_audit::{AuditAction, AuditReport, RiskLevel};
 use crate::domain::stats::LogStatRow;
+use crate::infrastructure::sqlite::{bad_row, db_err, fmt_utc, parse_utc};
 
 /// Row mapping for the request log table: one-to-one with the current request_logs schema.
 /// INTEGER columns are read as i64, then converted to the domain layer's narrow types via `TryFrom`.
@@ -90,7 +91,10 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         .bind(log.prompt_tokens.map(i64::from))
         .bind(log.completion_tokens.map(i64::from))
         .bind(log.total_tokens.map(i64::from))
-        .bind(i64::try_from(log.duration_ms).map_err(|_| bad_row("duration_ms out of range"))?)
+        .bind(
+            i64::try_from(log.duration_ms)
+                .map_err(|_| bad_row("request_log", "duration_ms out of range"))?,
+        )
         .bind(&log.error_message)
         .bind(log.is_stream)
         .bind(log.is_retry)
@@ -103,9 +107,9 @@ impl RequestLogRepository for SqliteRequestLogRepository {
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()
-                .map_err(|e| bad_row(&format!("invalid audit_report: {e}")))?,
+                .map_err(|e| bad_row("request_log", &format!("invalid audit_report: {e}")))?,
         )
-        .bind(fmt_time(log.created_at))
+        .bind(fmt_utc(log.created_at))
         .execute(&self.pool)
         .await
         .map_err(db_err)?;
@@ -169,7 +173,7 @@ impl RequestLogRepository for SqliteRequestLogRepository {
 
     async fn delete_before(&self, before: DateTime<Utc>) -> Result<u64, RepositoryError> {
         let result = sqlx::query("DELETE FROM request_logs WHERE created_at < ?")
-            .bind(fmt_time(before))
+            .bind(fmt_utc(before))
             .execute(&self.pool)
             .await
             .map_err(db_err)?;
@@ -199,11 +203,11 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         let mut clauses: Vec<&str> = Vec::new();
         if let Some(start) = start_at {
             clauses.push("created_at >= ?");
-            binds.push(fmt_time(start));
+            binds.push(fmt_utc(start));
         }
         if let Some(end) = end_at {
             clauses.push("created_at < ?");
-            binds.push(fmt_time(end));
+            binds.push(fmt_utc(end));
         }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
@@ -217,15 +221,6 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         let rows: Vec<StatRowDb> = q.fetch_all(&self.pool).await.map_err(db_err)?;
         rows.into_iter().map(LogStatRow::try_from).collect()
     }
-}
-
-/// Stored time format: fixed 9 fractional digits + `Z` (`SecondsFormat::Nanos`).
-/// A variable-precision format (`to_rfc3339`'s AutoSi) mismatches when comparing subsecond logs against whole-second
-/// boundaries — `"12:00:00Z"` vs `"12:00:00.123456789Z"` differ at `'Z'`(0x5A) / `'.'`(0x2E), breaking the half-open
-/// semantics of date filtering. Using this format everywhere (write and query binds) keeps values comparable,
-/// and nanosecond precision round-trips fully (consistent with the domain layer's `DateTime<Utc>`).
-fn fmt_time(dt: DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
 
 /// Escapes `%` / `_` / `\` as literals and wraps them into a LIKE full-match pattern (with `ESCAPE '\'`).
@@ -275,11 +270,11 @@ fn build_where(query: &LogQuery) -> (String, Vec<String>) {
     }
     if let Some(start) = query.start_at {
         clauses.push("created_at >= ?".to_string());
-        binds.push(fmt_time(start));
+        binds.push(fmt_utc(start));
     }
     if let Some(end) = query.end_at {
         clauses.push("created_at < ?".to_string());
-        binds.push(fmt_time(end));
+        binds.push(fmt_utc(end));
     }
 
     let where_sql = if clauses.is_empty() {
@@ -295,19 +290,20 @@ impl TryFrom<RequestLogDb> for RequestLog {
 
     fn try_from(row: RequestLogDb) -> Result<Self, Self::Error> {
         Ok(RequestLog {
-            id: Uuid::from_str(&row.id).map_err(|e| bad_row(&format!("invalid id: {e}")))?,
+            id: Uuid::from_str(&row.id)
+                .map_err(|e| bad_row("request_log", &format!("invalid id: {e}")))?,
             api_key_id: row
                 .api_key_id
                 .as_deref()
                 .map(Uuid::from_str)
                 .transpose()
-                .map_err(|e| bad_row(&format!("invalid api_key_id: {e}")))?,
+                .map_err(|e| bad_row("request_log", &format!("invalid api_key_id: {e}")))?,
             channel_id: row
                 .channel_id
                 .as_deref()
                 .map(Uuid::from_str)
                 .transpose()
-                .map_err(|e| bad_row(&format!("invalid channel_id: {e}")))?,
+                .map_err(|e| bad_row("request_log", &format!("invalid channel_id: {e}")))?,
             model: row.model,
             upstream_model: row.upstream_model,
             status_code: narrow("status_code", row.status_code)?,
@@ -344,26 +340,31 @@ impl TryFrom<RequestLogDb> for RequestLog {
                 .as_deref()
                 .map(parse_audit_report)
                 .transpose()?,
-            created_at: parse_utc(&row.created_at)?,
+            created_at: parse_utc("request_log", &row.created_at)?,
         })
     }
 }
 
 fn audit_value<T: serde::Serialize>(value: T) -> Result<String, RepositoryError> {
     serde_json::to_value(value)
-        .map_err(|e| bad_row(&format!("invalid audit value: {e}")))?
+        .map_err(|e| bad_row("request_log", &format!("invalid audit value: {e}")))?
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| bad_row("audit value did not serialize as a string"))
+        .ok_or_else(|| bad_row("request_log", "audit value did not serialize as a string"))
 }
 
 fn parse_audit_value<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, RepositoryError> {
-    serde_json::from_value(serde_json::Value::String(value.to_string()))
-        .map_err(|e| bad_row(&format!("invalid audit value {value:?}: {e}")))
+    serde_json::from_value(serde_json::Value::String(value.to_string())).map_err(|e| {
+        bad_row(
+            "request_log",
+            &format!("invalid audit value {value:?}: {e}"),
+        )
+    })
 }
 
 fn parse_audit_report(value: &str) -> Result<AuditReport, RepositoryError> {
-    serde_json::from_str(value).map_err(|e| bad_row(&format!("invalid audit_report: {e}")))
+    serde_json::from_str(value)
+        .map_err(|e| bad_row("request_log", &format!("invalid audit_report: {e}")))
 }
 
 /// Narrows a stored signed i64 to the domain layer's narrow integer type (negative or overflow values
@@ -372,7 +373,7 @@ fn narrow<T: TryFrom<i64>>(column: &str, value: i64) -> Result<T, RepositoryErro
 where
     T::Error: std::fmt::Debug,
 {
-    T::try_from(value).map_err(|_| bad_row(&format!("{column} out of range")))
+    T::try_from(value).map_err(|_| bad_row("request_log", &format!("{column} out of range")))
 }
 
 impl TryFrom<StatRowDb> for LogStatRow {
@@ -385,7 +386,7 @@ impl TryFrom<StatRowDb> for LogStatRow {
                 .as_deref()
                 .map(Uuid::from_str)
                 .transpose()
-                .map_err(|e| bad_row(&format!("invalid channel_id: {e}")))?,
+                .map_err(|e| bad_row("request_log", &format!("invalid channel_id: {e}")))?,
             model: row.model,
             status_code: narrow("status_code", row.status_code)?,
             total_tokens: row
@@ -393,25 +394,9 @@ impl TryFrom<StatRowDb> for LogStatRow {
                 .map(|t| narrow("total_tokens", t))
                 .transpose()?,
             duration_ms: narrow("duration_ms", row.duration_ms)?,
-            created_at: parse_utc(&row.created_at)?,
+            created_at: parse_utc("request_log", &row.created_at)?,
         })
     }
-}
-
-/// Parses a stored RFC3339 time string into `DateTime<Utc>`.
-fn parse_utc(s: &str) -> Result<DateTime<Utc>, RepositoryError> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| bad_row(&format!("invalid timestamp {s:?}: {e}")))
-}
-
-fn db_err(e: sqlx::Error) -> RepositoryError {
-    RepositoryError::Database(e.to_string())
-}
-
-/// Builds a "corrupted row data" error: stored data cannot be parsed into a domain model.
-fn bad_row(reason: &str) -> RepositoryError {
-    RepositoryError::Database(format!("invalid request_log row: {reason}"))
 }
 
 #[cfg(test)]
