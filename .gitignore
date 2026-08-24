@@ -18,6 +18,11 @@ dist-ssr
 # Scratch / working notes (local only, not committed)
 .scratch/
 .worktrees/
+docs/spec/
+docs/Spec-implementation.md
+
+# Local tool settings
+.claude/settings.local.json
 
 # Editor directories and files
 .vscode/*
