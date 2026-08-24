@@ -20,6 +20,7 @@ dist-ssr
 .worktrees/
 docs/spec/
 docs/Spec-implementation.md
+docs/interview.md
 
 # Local tool settings
 .claude/settings.local.json

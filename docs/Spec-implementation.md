@@ -80,8 +80,8 @@ revue-gate 的设计文档已齐备（需求、路线图、前后端架构），
 2. **分层与依赖方向**：`interface → usecases → domain`，`infrastructure → domain`，全部向内指向 domain，不反向。domain 零技术依赖（无 sqlx / reqwest / axum / tauri）。仓储依赖倒置：trait 定义在 domain，sqlx 实现在 infrastructure，usecases 只依赖 trait。
 3. **模块形态**：一聚合一文件——Channel、ApiKey、RequestLog 三个聚合根，各自携带 Repository trait；值对象 ModelMapping、Quota 随聚合根；领域服务 ChannelSelector（选渠道）、QuotaPolicy（配额校验）只做纯业务判断；ProviderAdaptor trait 隔离供应商协议差异。单文件超过 ~400 行升级为文件夹结构（演进触发线）。
 4. **数据面契约**：`POST /v1/chat/completions`、`GET /v1/models`（启用渠道模型合并去重，不按密钥过滤，禁用渠道剔除）、`GET /health`；Bearer 认证；SSE 流式透传。认证失败 `401`，配额超限 `429`。
-5. **调度与重试**：按模型筛选候选 → 优先级排序 → 应用模型映射 → 转发 → 解析 usage → 记账 → 写日志；失败按候选渠道顺序重试（≤ 候选渠道数）。
-6. **供应商适配器**：OpenAI / DeepSeek / Custom 走 OpenAI-compatible 直通；Claude / Gemini 协议转换，转换逻辑限定在 infrastructure 的适配器内。`test()` 用各自模型列表端点。
+5. **调度与重试**：按模型筛选候选 → 优先级排序 → 应用模型映射 → 转发 → 解析 Token Usage → 记账 → 写日志；失败按候选渠道顺序重试（≤ 候选渠道数）。
+6. **供应商适配器**：OpenAI / DeepSeek / Custom 走 OpenAI-compatible 直通；Claude / Gemini 协议转换，转换逻辑限定在 infrastructure 的适配器内。`test()` 用各自模型列表端点，`fetch_models()` 用于用户手动获取 provider-reported 模型列表，不支持时显式返回 unsupported。
 7. **密钥格式**：`sk-revue-<16 位随机 hex>`（25 字符，8 字节熵）；上游密钥永不落库明文暴露给下游。
 8. **ID 与时间**：uuid v7（时间有序主键）；chrono `DateTime<Utc>`，审计时间一律 UTC 存储。
 9. **错误处理**：domain / usecases 用 thiserror 错误枚举；interface / main 用 anyhow 收尾。
@@ -96,7 +96,7 @@ revue-gate 的设计文档已齐备（需求、路线图、前后端架构），
 | 1 | 项目搭建 + 冒烟 | Tauri + React 骨架，TS 锁定 | `pnpm dev` / `pnpm build` / `tsc` 全绿 |
 | 2 | domain 层 | 3 个聚合根 + 值对象 + Repository trait + ProviderAdaptor trait + 领域服务 | 编译通过，纯逻辑单测（经 usecases 触发） |
 | 3 | infrastructure：sqlite + migrations | 各仓储实现 + 内嵌迁移 | `sqlx query!` 编译期校验通过 |
-| 4 | usecases 编排 | proxy / auth / channel / api_key / log / stats / settings 用例 + 错误枚举成型 | **seam A**：mock trait 编排测试全绿 |
+| 4 | usecases 编排 | proxy / auth / channel / api_key / log / stats / settings 用例 + 错误枚举成型；channel 用例含手动获取模型列表 | **seam A**：mock trait 编排测试全绿 |
 | 5 | interface：http 数据面 | `/v1/*` 路由 + handlers + SSE 透传 + TraceLayer | **seam B**：oneshot 集成测试（含 SSE）全绿 |
 | 6 | interface：tauri 控制面 | 各域命令封装 | 命令调用冒烟通过 |
 | 7 | 前端骨架 + 各页面 | Dashboard / Channels / API Keys / Logs / Settings | `pnpm build` + `tsc` 全绿，页面冒烟 |
@@ -104,7 +104,7 @@ revue-gate 的设计文档已齐备（需求、路线图、前后端架构），
 ## Testing Decisions
 
 - **原则**：只测外部行为（公开接口的输入 → 输出），不测实现细节、不 mock 业务本身、不 mock 被测对象内部协作之外的技术细节。
-- **Seam A — usecases 编排测试（主）**：对 Repository trait 与 ProviderAdaptor trait 提供内存 mock 实现。覆盖：proxy 全闭环（认证 → 选渠道 → 映射 → 转发 → 记账 → 日志 → 重试的每一条分支）、auth（401 / 429）、channel / api_key CRUD 与配额、log 分页与筛选、stats 聚合。domain 纯逻辑（ChannelSelector / QuotaPolicy）经由这些用例被覆盖。
+- **Seam A — usecases 编排测试（主）**：对 Repository trait 与 ProviderAdaptor trait 提供内存 mock 实现。覆盖：proxy 全闭环（认证 → 选渠道 → 映射 → 转发 → 记账 → 日志 → 重试的每一条分支）、auth（401 / 429）、channel / api_key CRUD、模型发现与配额、log 分页与筛选、stats 聚合。domain 纯逻辑（ChannelSelector / QuotaPolicy）经由这些用例被覆盖。
 - **Seam B — http oneshot 集成测试（补充）**：`tower::ServiceExt::oneshot` + 内存 SQLite + 真实仓储实现。验证：路由存在性、Bearer 认证 `401`、配额 `429`、`/v1/models` 合并去重、**SSE 流式透传含 `[DONE]` 收尾**——SSE 是唯一必须真实 HTTP 验证的点，流式中断与收尾只有该 seam 能可靠覆盖。
 - **TDD 流程**：每阶段 Red-Green-Refactor 循环，先写失败测试定义需求，再最小实现，最后重构；阶段切换时向用户声明当前阶段。
 - **前端验证**：`pnpm dev` + `pnpm build` + `tsc` 冒烟 + 页面手工冒烟；不引入前端单测框架，页面逻辑保持薄壳，核心在 Command 封装与后端。
