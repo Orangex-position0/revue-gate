@@ -1,6 +1,6 @@
 # 安全审计引擎
 
-> **当前实现文档（v0.2.0）**：安全审计模块已经落地为请求日志的风险扩展。它在请求转发到上游之前扫描 OpenAI-compatible 请求体，生成 `AuditReport`，并把 `risk_level`、`audit_action`、`audit_report` 保存到 `request_logs`。MVP 决策见 [ADR 0001](../../adr/0001-security-audit-mvp.md)，需求规格见 [Spec-security-audit-mvp.md](../../Spec-security-audit-mvp.md)。
+> **当前实现文档（v0.2.0）**：安全审计模块已经落地为请求日志的风险扩展。它在请求转发到上游之前扫描 OpenAI-compatible 请求体，生成 `AuditReport`，并把 `risk_level`、`audit_action`、`audit_report` 保存到 `request_logs`。MVP 决策见 [ADR 0001](../../adr/0001-security-audit-mvp.md)，需求规格见 [Spec-security-audit-mvp.md](../../spec/Spec-security-audit-mvp.md)。
 
 ## 1. 概述
 
