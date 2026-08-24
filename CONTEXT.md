@@ -12,6 +12,22 @@ _Avoid_: Provider key, upstream key
 A configured provider endpoint that revue-gate can forward a model request to after local authorization and routing.
 _Avoid_: Route, backend, provider account
 
+**Provider**:
+An upstream model service family, such as OpenAI-compatible, Anthropic, Gemini, or DeepSeek. A provider is not the same as a configured upstream channel.
+_Avoid_: Channel, model
+
+**Model**:
+The upstream model identifier selected for a logical request, either from revue-gate's default catalog or from a provider-reported model list.
+_Avoid_: Provider, channel
+
+**Token Usage**:
+The prompt, completion, and total token counts reported for a logical request or upstream attempt.
+_Avoid_: Usage, quota usage, billing usage
+
+**Channel Cooldown**:
+A temporary routing exclusion for an upstream channel after repeated retryable failures. It is lighter than a full circuit breaker and does not imply a Closed/Open/HalfOpen state machine.
+_Avoid_: Circuit breaker, circuit
+
 **Request Log**:
 The request-level record that explains what revue-gate did for one client request, including routing, status, usage, trace, and audit summary.
 _Avoid_: Access log, audit event
