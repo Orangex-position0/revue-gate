@@ -1,6 +1,6 @@
 # revue-gate managed hooks: one prek setup shared by Rust (src-tauri) and the frontend (React+TS)
 # Install: prek install (run from repo root); pre-commit filters by changed files, pre-push is a full gate
-default_install_hook_types = ["pre-commit", "pre-push"]
+default_install_hook_types = ["pre-commit", "pre-push", "commit-msg"]
 
 [[repos]]
 repo = "local"
@@ -64,3 +64,12 @@ entry = "pnpm build"
 pass_filenames = false
 always_run = true
 stages = ["pre-push"]
+
+# ---- Commit metadata ----
+
+[[repos.hooks]]
+id = "commit-msg"
+name = "Conventional Commit message"
+language = "system"
+entry = "node scripts/check-commit-msg.mjs"
+stages = ["commit-msg"]
