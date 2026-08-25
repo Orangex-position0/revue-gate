@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Tauri Linux dependencies
         if: runner.os == 'Linux'
@@ -43,12 +43,12 @@ jobs:
             patchelf
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.8.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 26
           cache: pnpm
@@ -68,7 +68,7 @@ jobs:
         run: pnpm tauri build
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bundle-${{ matrix.os }}
           path: src-tauri/target/release/bundle/**
@@ -80,16 +80,36 @@ jobs:
     needs: build
     steps:
       - name: Download bundle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: release-assets
 
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find release-assets -type f \( \
+            -name '*.msi' -o \
+            -name '*.exe' -o \
+            -name '*.dmg' -o \
+            -name '*.AppImage' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' -o \
+            -name '*.tar.gz' -o \
+            -name '*.zip' -o \
+            -name '*.sig' \
+          \) -print0 | while IFS= read -r -d '' file; do
+            cp "$file" "release-files/$(basename "$file")"
+          done
+          find release-files -maxdepth 1 -type f | sort
+          test -n "$(find release-files -maxdepth 1 -type f -print -quit)"
+
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           fail_on_unmatched_files: true
-          files: release-assets/**
+          overwrite_files: true
+          files: release-files/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
