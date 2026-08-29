@@ -38,6 +38,7 @@ struct RequestLogDb {
     is_retry: bool,
     trace_id: String,
     request_body: Option<String>,
+    response_choices: Option<String>,
     risk_level: Option<String>,
     audit_action: Option<String>,
     audit_report: Option<String>,
@@ -58,7 +59,8 @@ struct StatRowDb {
 /// SELECT column list (shared by all queries to avoid repetition).
 const SELECT_COLUMNS: &str = "id, api_key_id, channel_id, model, upstream_model, status_code, \
      prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message, is_stream, \
-     is_retry, trace_id, request_body, risk_level, audit_action, audit_report, created_at";
+     is_retry, trace_id, request_body, response_choices, risk_level, audit_action, audit_report, \
+     created_at";
 
 /// RequestLogRepository implementation backed by an sqlx pool.
 pub struct SqliteRequestLogRepository {
@@ -78,9 +80,9 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         sqlx::query(
             "INSERT INTO request_logs (id, api_key_id, channel_id, model, upstream_model, \
                 status_code, prompt_tokens, completion_tokens, total_tokens, duration_ms, \
-                error_message, is_stream, is_retry, trace_id, request_body, risk_level, \
-                audit_action, audit_report, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                error_message, is_stream, is_retry, trace_id, request_body, response_choices, \
+                risk_level, audit_action, audit_report, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(log.id.to_string())
         .bind(log.api_key_id.map(|id| id.to_string()))
@@ -100,6 +102,7 @@ impl RequestLogRepository for SqliteRequestLogRepository {
         .bind(log.is_retry)
         .bind(&log.trace_id)
         .bind(&log.request_body)
+        .bind(&log.response_choices)
         .bind(log.risk_level.map(audit_value).transpose()?)
         .bind(log.audit_action.map(audit_value).transpose()?)
         .bind(
@@ -325,6 +328,7 @@ impl TryFrom<RequestLogDb> for RequestLog {
             is_retry: row.is_retry,
             trace_id: row.trace_id,
             request_body: row.request_body,
+            response_choices: row.response_choices,
             risk_level: row
                 .risk_level
                 .as_deref()
@@ -427,6 +431,8 @@ mod tests {
         log.is_retry = true;
         log.trace_id = "trace-abc".to_string();
         log.request_body = Some(r#"{"model":"gpt-4o"}"#.to_string());
+        log.response_choices =
+            Some(r#"[{"index":0,"message":{"role":"assistant","content":"hello"}}]"#.to_string());
         log.risk_level = Some(RiskLevel::Clean);
         log.audit_action = Some(AuditAction::Allow);
         log.audit_report = Some(AuditReport {

@@ -13,7 +13,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use super::handlers::{
-    AppState, TraceIdSpan, TraceOnResponse, chat_completions, models, trace_id_middleware,
+    AppState, TraceIdSpan, TraceOnResponse, anthropic_messages, chat_completions, models,
+    responses, trace_id_middleware,
 };
 
 /// Build the data-plane route tree: /health + /v1/chat/completions + /v1/models, with the trace propagation layer attached.
@@ -21,6 +22,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/responses", post(responses))
         .route("/v1/models", get(models))
         .with_state(state)
         .layer(

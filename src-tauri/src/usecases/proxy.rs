@@ -224,6 +224,7 @@ impl ProxyRequestUsecase {
                 store_payload: audit_policy.store_payload,
                 redacted_body,
                 audit_report,
+                audit_policy: audit_policy.clone(),
                 started: Instant::now(),
             };
             record_policy_blocked(self.log_repo.as_ref(), &ctx).await;
@@ -255,6 +256,7 @@ impl ProxyRequestUsecase {
                 store_payload: audit_policy.store_payload,
                 redacted_body: redacted_body.clone(),
                 audit_report: audit_report.clone(),
+                audit_policy: audit_policy.clone(),
                 started: Instant::now(),
             };
 
@@ -366,6 +368,7 @@ struct AttemptContext {
     /// retry attempts; never used for the forwarded upstream payload.
     redacted_body: Option<Value>,
     audit_report: Option<AuditReport>,
+    audit_policy: AuditPolicy,
     started: Instant,
 }
 
@@ -379,7 +382,14 @@ async fn record_success(
     if let Err(e) = accumulate_usage(api_key_repo, ctx.api_key.id, response.usage).await {
         tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to accumulate quota after successful forward");
     }
-    let log = build_log(ctx, response.status_code, response.usage, None);
+    let response_choices = response_choices_from_body(&response.body, &ctx.audit_policy);
+    let log = build_log(
+        ctx,
+        response.status_code,
+        response.usage,
+        None,
+        response_choices,
+    );
     if let Err(e) = log_repo.save(&log).await {
         tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write request log after successful forward");
     }
@@ -397,6 +407,7 @@ async fn record_failure(
         status.unwrap_or(502),
         None,
         Some(error_message.to_string()),
+        None,
     );
     if let Err(e) = log_repo.save(&log).await {
         tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write failure request log");
@@ -410,6 +421,7 @@ async fn record_policy_blocked(log_repo: &dyn RequestLogRepository, ctx: &Attemp
         403,
         None,
         Some("blocked by security policy".to_string()),
+        None,
     );
     if let Err(e) = log_repo.save(&log).await {
         tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write blocked request log");
@@ -422,6 +434,7 @@ fn build_log(
     status_code: u16,
     usage: Option<TokenUsage>,
     error_message: Option<String>,
+    response_choices: Option<String>,
 ) -> RequestLog {
     let audit_report = ctx.audit_report.clone();
     RequestLog {
@@ -445,6 +458,7 @@ fn build_log(
                 .unwrap_or(ctx.request.body.clone())
                 .to_string()
         }),
+        response_choices,
         risk_level: audit_report.as_ref().map(|report| report.risk_level),
         audit_action: audit_report.as_ref().map(|report| report.action),
         audit_report,
@@ -452,11 +466,78 @@ fn build_log(
     }
 }
 
+fn response_choices_from_body(body: &[u8], audit_policy: &AuditPolicy) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let choices = value.get("choices")?.clone();
+    redacted_choices_string(choices, audit_policy)
+}
+
+fn synthetic_stream_choices(
+    content: &str,
+    finish_reason: Option<&str>,
+    audit_policy: &AuditPolicy,
+) -> Option<String> {
+    let choices = json!([{
+        "index": 0,
+        "message": {
+            "role": "assistant",
+            "content": content
+        },
+        "finish_reason": finish_reason.unwrap_or("stop")
+    }]);
+    redacted_choices_string(choices, audit_policy)
+}
+
+fn redacted_choices_string(choices: Value, audit_policy: &AuditPolicy) -> Option<String> {
+    let wrapped = json!({ "choices": choices });
+    let redacted = redact_body(&wrapped, audit_policy);
+    redacted.get("choices").map(Value::to_string)
+}
+
+fn observe_stream_choices(state: &mut StreamState, chunk: &[u8]) {
+    state.pending.extend_from_slice(chunk);
+    let mut consumed = 0usize;
+    for (i, &b) in state.pending.iter().enumerate() {
+        if b == b'\n' {
+            if let Some(line) = parse_sse_data_line(&state.pending[consumed..i])
+                && let Ok(value) = serde_json::from_slice::<Value>(line)
+            {
+                if let Some(content) = value
+                    .pointer("/choices/0/delta/content")
+                    .and_then(Value::as_str)
+                {
+                    state.response_text.push_str(content);
+                }
+                if let Some(reason) = value
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(Value::as_str)
+                {
+                    state.finish_reason = Some(reason.to_string());
+                }
+            }
+            consumed = i + 1;
+        }
+    }
+    state.pending.drain(..consumed);
+}
+
+fn parse_sse_data_line(line: &[u8]) -> Option<&[u8]> {
+    let text = std::str::from_utf8(line).ok()?.trim();
+    let payload = text.strip_prefix("data:")?.trim();
+    if payload == "[DONE]" {
+        return None;
+    }
+    Some(payload.as_bytes())
+}
+
 /// Billing / logging state at stream end.
 struct StreamState {
     inner: BoxStream<'static, Result<StreamEvent, ProviderError>>,
     done: bool,
     usage: TokenUsage,
+    response_text: String,
+    finish_reason: Option<String>,
+    pending: Vec<u8>,
 }
 
 /// Wrap the upstream stream: aggregate usage frame by frame; on normal end (None) bill + write a success log,
@@ -474,6 +555,9 @@ fn wrap_stream_bookkeeping(
             inner,
             done: false,
             usage: TokenUsage::default(),
+            response_text: String::new(),
+            finish_reason: None,
+            pending: Vec::new(),
         },
         move |mut state: StreamState| {
             let api_key_repo = Arc::clone(&api_key_repo);
@@ -488,6 +572,7 @@ fn wrap_stream_bookkeeping(
                         if let Some(u) = event.usage {
                             state.usage = state.usage.accumulate(u);
                         }
+                        observe_stream_choices(&mut state, &event.data);
                         Some((Ok(event), state))
                     }
                     Some(Err(err)) => {
@@ -503,8 +588,13 @@ fn wrap_stream_bookkeeping(
                         {
                             tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to accumulate quota after stream error");
                         }
-                        let log =
-                            build_log(&ctx, 502, Some(state.usage), Some(proxy_err.to_string()));
+                        let log = build_log(
+                            &ctx,
+                            502,
+                            Some(state.usage),
+                            Some(proxy_err.to_string()),
+                            None,
+                        );
                         if let Err(e) = log_repo.save(&log).await {
                             tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write stream failure log");
                         }
@@ -521,7 +611,12 @@ fn wrap_stream_bookkeeping(
                         {
                             tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to accumulate quota after stream ended");
                         }
-                        let log = build_log(&ctx, 200, Some(state.usage), None);
+                        let response_choices = synthetic_stream_choices(
+                            &state.response_text,
+                            state.finish_reason.as_deref(),
+                            &ctx.audit_policy,
+                        );
+                        let log = build_log(&ctx, 200, Some(state.usage), None, response_choices);
                         if let Err(e) = log_repo.save(&log).await {
                             tracing::warn!(error = %e, trace_id = %ctx.request.trace_id, "failed to write stream success log");
                         }

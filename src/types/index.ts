@@ -151,6 +151,7 @@ export interface RequestLog {
   isRetry: boolean;
   traceId: string;
   requestBody: string | null;
+  responseChoices: string | null;
   riskLevel: RiskLevel | null;
   auditAction: AuditAction | null;
   auditReport: AuditReport | null;

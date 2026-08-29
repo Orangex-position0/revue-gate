@@ -44,6 +44,8 @@ pub struct RequestLog {
     pub trace_id: String,
     /// Client request body (raw JSON).
     pub request_body: Option<String>,
+    /// Canonical OpenAI Chat choices array returned by the model.
+    pub response_choices: Option<String>,
     /// Request-level audit risk. None means audit was disabled for this request.
     pub risk_level: Option<RiskLevel>,
     /// Final audit action. None means audit was disabled for this request.

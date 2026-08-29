@@ -3,6 +3,7 @@
 pub mod domain;
 pub mod infrastructure;
 pub mod interface;
+pub mod protocol;
 #[cfg(test)]
 mod test_support;
 pub mod usecases;

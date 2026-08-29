@@ -12,10 +12,12 @@
 //! and logging complete inline in the usecase when the stream ends.
 //! Upstream keys are never returned: upstream error bodies are converged by the adapter into a generic error body (red line, see providers.rs).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
@@ -29,6 +31,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use crate::domain::channel::ChannelRepository;
+use crate::protocol::{CodecRegistry, ConversionContext, ProtocolError, ProtocolKind, StreamFrame};
 use crate::usecases::models::ListModelsUsecase;
 use crate::usecases::proxy::{ProxyError, ProxyRequest, ProxyRequestUsecase, ProxySuccess};
 
@@ -111,49 +114,124 @@ pub(crate) async fn chat_completions(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    handle_protocol_request(ProtocolKind::OpenAiChat, state, trace_id, headers, body).await
+}
+
+pub(crate) async fn anthropic_messages(
+    State(state): State<AppState>,
+    Extension(trace_id): Extension<TraceId>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    handle_protocol_request(
+        ProtocolKind::AnthropicMessages,
+        state,
+        trace_id,
+        headers,
+        body,
+    )
+    .await
+}
+
+pub(crate) async fn responses(
+    State(state): State<AppState>,
+    Extension(trace_id): Extension<TraceId>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    handle_protocol_request(
+        ProtocolKind::OpenAiResponses,
+        state,
+        trace_id,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn handle_protocol_request(
+    protocol: ProtocolKind,
+    state: AppState,
+    trace_id: TraceId,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
-        Err(rejection) => return error_response(StatusCode::BAD_REQUEST, &rejection.body_text()),
+        Err(rejection) => {
+            return protocol_error_response(
+                protocol,
+                StatusCode::BAD_REQUEST,
+                &rejection.body_text(),
+            );
+        }
     };
-    let bearer_token = extract_bearer(&headers);
-    // Auth precedes feature gates: a missing Bearer always returns 401 (including streaming requests; the requirement is "missing/invalid Bearer returns 401").
-    // Validity checking still lives in the proxy usecase (present but invalid → usecase → 401).
+    let bearer_token = extract_local_api_key(protocol, &headers);
     if bearer_token.is_none() {
-        return error_response(StatusCode::UNAUTHORIZED, "missing bearer token");
+        return protocol_error_response(protocol, StatusCode::UNAUTHORIZED, "missing api key");
     }
+    let context = ConversionContext {
+        trace_id: trace_id.0.clone(),
+        now_unix: current_unix_timestamp(),
+    };
+    let converted = match CodecRegistry::convert_request(protocol, body, &context) {
+        Ok(converted) => converted,
+        Err(err) => return protocol_conversion_error_response(protocol, err),
+    };
     let request = ProxyRequest {
         bearer_token,
-        model: body
+        model: converted
+            .body
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
-        body,
+        stream: converted.stream,
+        body: converted.body,
         trace_id: trace_id.0,
     };
     match state.proxy.execute(request).await {
         Ok(ProxySuccess::NonStream(resp)) => {
             let status =
                 StatusCode::from_u16(resp.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (
-                status,
-                [(header::CONTENT_TYPE, "application/json")],
-                resp.body,
-            )
-                .into_response()
+            if !status.is_success() {
+                if protocol == ProtocolKind::OpenAiChat {
+                    return (
+                        status,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        resp.body,
+                    )
+                        .into_response();
+                }
+                return protocol_error_response(protocol, status, "upstream request failed");
+            }
+            let body = match serde_json::from_slice::<Value>(&resp.body) {
+                Ok(value) => match CodecRegistry::convert_response(protocol, value, &context) {
+                    Ok(converted) => match serde_json::to_vec(&converted.body) {
+                        Ok(body) => body,
+                        Err(err) => {
+                            return protocol_error_response(
+                                protocol,
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &err.to_string(),
+                            );
+                        }
+                    },
+                    Err(err) => return protocol_conversion_error_response(protocol, err),
+                },
+                Err(_) if protocol == ProtocolKind::OpenAiChat => resp.body,
+                Err(err) => {
+                    return protocol_error_response(
+                        protocol,
+                        StatusCode::BAD_GATEWAY,
+                        &format!("invalid canonical response: {err}"),
+                    );
+                }
+            };
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
         }
         Ok(ProxySuccess::Stream(stream)) => {
-            // Forward upstream SSE bytes frame by frame, writing as frames arrive (real-time); `[DONE]` is
-            // passed through from upstream or synthesized by the conversion adapter, and the response body ends
-            // when the stream ends. On mid-stream errors the usecase already wrote a failure log and terminated
-            // the stream, so we stop relaying here and the client sees a truncated stream without `[DONE]` (headers already sent, status cannot change).
-            let resp_body = Body::from_stream(stream.filter_map(|event| async move {
-                match event {
-                    Ok(event) => Some(Ok::<_, std::convert::Infallible>(event.data)),
-                    Err(_) => None,
-                }
-            }));
+            let resp_body = Body::from_stream(transform_proxy_stream(protocol, &context, stream));
             (
                 StatusCode::OK,
                 [
@@ -164,7 +242,7 @@ pub(crate) async fn chat_completions(
             )
                 .into_response()
         }
-        Err(err) => proxy_error_response(err),
+        Err(err) => proxy_error_response(protocol, err),
     }
 }
 
@@ -203,6 +281,26 @@ fn extract_bearer(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+static X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
+
+fn extract_local_api_key(protocol: ProtocolKind, headers: &HeaderMap) -> Option<String> {
+    match protocol {
+        ProtocolKind::AnthropicMessages => {
+            extract_x_api_key(headers).or_else(|| extract_bearer(headers))
+        }
+        ProtocolKind::OpenAiChat | ProtocolKind::OpenAiResponses => extract_bearer(headers),
+    }
+}
+
+fn extract_x_api_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(&X_API_KEY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
 /// OpenAI-style error response: `{"error": {"message": ..., "type": ...}}`, with type mapped from the status code to the OpenAI category.
 fn error_response(status: StatusCode, message: &str) -> Response {
     (
@@ -210,6 +308,23 @@ fn error_response(status: StatusCode, message: &str) -> Response {
         Json(json!({"error": {"message": message, "type": error_type(status)}})),
     )
         .into_response()
+}
+
+fn protocol_error_response(protocol: ProtocolKind, status: StatusCode, message: &str) -> Response {
+    match protocol {
+        ProtocolKind::AnthropicMessages => (
+            status,
+            Json(
+                json!({"type": "error", "error": {"message": message, "type": error_type(status)}}),
+            ),
+        )
+            .into_response(),
+        ProtocolKind::OpenAiChat | ProtocolKind::OpenAiResponses => error_response(status, message),
+    }
+}
+
+fn protocol_conversion_error_response(protocol: ProtocolKind, err: ProtocolError) -> Response {
+    protocol_error_response(protocol, StatusCode::BAD_REQUEST, &err.to_string())
 }
 
 /// OpenAI error type mapping: downstream SDKs often branch on type (401→authentication_error,
@@ -233,7 +348,7 @@ fn proxy_error_type(err: &ProxyError, status: StatusCode) -> &'static str {
 }
 
 /// Proxy error → status code + error body (401 / 429 / 404 / 502 / 500 / 400 mapped one-to-one to the usecase branches).
-fn proxy_error_response(err: ProxyError) -> Response {
+fn proxy_error_response(protocol: ProtocolKind, err: ProxyError) -> Response {
     let status = match &err {
         ProxyError::Unauthorized => StatusCode::UNAUTHORIZED,
         ProxyError::QuotaExceeded => StatusCode::TOO_MANY_REQUESTS,
@@ -243,13 +358,86 @@ fn proxy_error_response(err: ProxyError) -> Response {
         ProxyError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
         ProxyError::SecurityPolicyBlocked => StatusCode::FORBIDDEN,
     };
-    (
-        status,
-        Json(
-            json!({"error": {"message": err.to_string(), "type": proxy_error_type(&err, status)}}),
-        ),
+    match protocol {
+        ProtocolKind::AnthropicMessages => (
+            status,
+            Json(json!({"type": "error", "error": {"message": err.to_string(), "type": proxy_error_type(&err, status)}})),
+        )
+            .into_response(),
+        ProtocolKind::OpenAiChat | ProtocolKind::OpenAiResponses => (
+            status,
+            Json(json!({"error": {"message": err.to_string(), "type": proxy_error_type(&err, status)}})),
+        )
+            .into_response(),
+    }
+}
+
+fn current_unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn transform_proxy_stream(
+    protocol: ProtocolKind,
+    context: &ConversionContext,
+    stream: futures_util::stream::BoxStream<
+        'static,
+        Result<crate::domain::provider::StreamEvent, ProxyError>,
+    >,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static {
+    struct State {
+        stream: futures_util::stream::BoxStream<
+            'static,
+            Result<crate::domain::provider::StreamEvent, ProxyError>,
+        >,
+        transformer: Box<dyn crate::protocol::StreamTransformer + Send>,
+        pending: VecDeque<StreamFrame>,
+        finished: bool,
+    }
+
+    let transformer = CodecRegistry::stream_transformer(protocol, context);
+    futures_util::stream::unfold(
+        State {
+            stream,
+            transformer,
+            pending: VecDeque::new(),
+            finished: false,
+        },
+        |mut state| async move {
+            loop {
+                if let Some(frame) = state.pending.pop_front() {
+                    return Some((Ok(frame.bytes), state));
+                }
+                if state.finished {
+                    return None;
+                }
+                match state.stream.next().await {
+                    Some(Ok(event)) => {
+                        match state.transformer.transform_chunk(Bytes::from(event.data)) {
+                            Ok(frames) => state.pending.extend(frames),
+                            Err(_) => {
+                                return None;
+                            }
+                        }
+                    }
+                    Some(Err(_)) => {
+                        return None;
+                    }
+                    None => match state.transformer.finish() {
+                        Ok(frames) => {
+                            state.pending.extend(frames);
+                            state.finished = true;
+                        }
+                        Err(_) => {
+                            return None;
+                        }
+                    },
+                }
+            }
+        },
     )
-        .into_response()
 }
 
 #[cfg(test)]
