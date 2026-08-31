@@ -241,6 +241,21 @@ export interface AuditSettings {
   evidenceLevel: AuditEvidenceLevel;
 }
 
+export interface ServiceModuleSettings {
+  knowledge: boolean;
+  mcp: boolean;
+}
+
+export interface ServiceModuleStatus {
+  id: string;
+  name: string;
+  description: string;
+  pathPrefixes: string[];
+  enabled: boolean;
+  running: boolean;
+  stats: Record<string, unknown>;
+}
+
 /** Gateway settings snapshot: aligned with the backend GatewaySettings serde camelCase; port 0 = random port. */
 export interface GatewaySettings {
   host: string;
@@ -251,4 +266,5 @@ export interface GatewaySettings {
   autostart: boolean;
   retry: RetryPolicy;
   audit: AuditSettings;
+  serviceModules: ServiceModuleSettings;
 }

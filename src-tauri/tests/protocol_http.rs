@@ -52,10 +52,13 @@ fn app(h: &Harness) -> Router {
         Box::new(|c: &Channel| adaptor_for(c.channel_type)),
         Arc::new(RwLock::new(GatewaySettings::default())),
     );
-    build_router(AppState {
-        proxy: Arc::new(usecase),
-        channel_repo: Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
-    })
+    build_router(
+        AppState {
+            proxy: Arc::new(usecase),
+            channel_repo: Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
+        },
+        &GatewaySettings::default(),
+    )
 }
 
 async fn seed(h: &Harness, base_url: &str) -> String {

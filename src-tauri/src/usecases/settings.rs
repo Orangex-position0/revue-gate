@@ -61,7 +61,7 @@ fn normalize_host(mut settings: GatewaySettings) -> GatewaySettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::settings::Theme;
+    use crate::domain::settings::{ServiceModuleSettings, Theme};
     use crate::test_support::InMemorySettingsRepository;
 
     /// Empty repository: load returns default settings (host 127.0.0.1, port 3000, theme system, default retry).
@@ -102,6 +102,10 @@ mod tests {
                 scan_byte_limit: 4096,
                 store_payload: false,
                 ..Default::default()
+            },
+            service_modules: ServiceModuleSettings {
+                knowledge: false,
+                mcp: true,
             },
         };
 

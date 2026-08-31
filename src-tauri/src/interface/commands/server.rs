@@ -82,7 +82,12 @@ pub(crate) async fn start_gateway(
     host: &str,
     port: u16,
 ) -> Result<ServerStatus, String> {
-    let router = build_router(app.state::<AppState>().inner().clone());
+    let settings = app
+        .state::<Arc<RwLock<GatewaySettings>>>()
+        .read()
+        .expect("settings lock poisoned")
+        .clone();
+    let router = build_router(app.state::<AppState>().inner().clone(), &settings);
     let addr = app
         .state::<ServerManager>()
         .start(host, port, router)

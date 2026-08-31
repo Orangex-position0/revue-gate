@@ -11,6 +11,7 @@ import type {
   LogPage,
   LogQuery,
   ServerStatus,
+  ServiceModuleStatus,
   StatsSnapshot,
   UsageStats,
 } from "@/types";
@@ -37,6 +38,11 @@ export const settingsApi = {
   /** Save the full settings snapshot: validate → apply autostart → persist → update shared settings (effective immediately). */
   save: (settings: GatewaySettings) =>
     invoke<void>("save_settings", { settings }),
+};
+
+export const serviceApi = {
+  /** Service Module statuses: currently empty until real modules are registered. */
+  statuses: () => invoke<ServiceModuleStatus[]>("get_service_statuses"),
 };
 
 export const channelApi = {

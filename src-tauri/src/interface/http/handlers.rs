@@ -514,13 +514,13 @@ mod tests {
             Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
             Arc::clone(&h.log_repo) as Arc<dyn crate::domain::request_log::RequestLogRepository>,
             Box::new(|c: &Channel| adaptor_for(c.channel_type)),
-            Arc::new(std::sync::RwLock::new(settings)),
+            Arc::new(std::sync::RwLock::new(settings.clone())),
         );
         let state = AppState {
             proxy: Arc::new(usecase),
             channel_repo: Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
         };
-        build_router(state)
+        build_router(state, &settings)
     }
 
     /// Save an enabled channel pointing at the mock upstream (model gpt-4o) plus one valid local key, returning the key plaintext.

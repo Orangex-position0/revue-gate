@@ -27,6 +27,7 @@ use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, l
 use interface::commands::server::{
     get_server_status, resolve_host_port, start_gateway, start_server, stop_gateway, stop_server,
 };
+use interface::commands::services::get_service_statuses;
 use interface::commands::settings::{apply_autostart, get_settings, save_settings};
 use interface::commands::stats::{get_stats, usage_stats};
 use interface::http::handlers::AppState;
@@ -140,6 +141,7 @@ pub fn run() {
             get_server_status,
             start_server,
             stop_server,
+            get_service_statuses,
             get_settings,
             save_settings,
             list_channels,

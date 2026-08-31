@@ -16,15 +16,23 @@ use super::handlers::{
     AppState, TraceIdSpan, TraceOnResponse, anthropic_messages, chat_completions, models,
     responses, trace_id_middleware,
 };
+use super::service_modules::ServiceRegistry;
+use crate::domain::settings::GatewaySettings;
 
 /// Build the data-plane route tree: /health + /v1/chat/completions + /v1/models, with the trace propagation layer attached.
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(state: AppState, settings: &GatewaySettings) -> Router {
+    let service_registry = ServiceRegistry::new();
+    service_registry
+        .validate()
+        .expect("service module registry must be valid");
+
     Router::new()
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/responses", post(responses))
         .route("/v1/models", get(models))
+        .merge(service_registry.merge_routes(&settings.service_modules))
         .with_state(state)
         .layer(
             TraceLayer::new_for_http()
@@ -97,7 +105,10 @@ mod tests {
     /// seam B: `/health` should return 200 OK (oneshot integration test, no real port bound).
     #[tokio::test]
     async fn health_returns_200() {
-        let app = build_router(minimal_state());
+        let app = build_router(
+            minimal_state(),
+            &crate::domain::settings::GatewaySettings::default(),
+        );
         let response = app
             .oneshot(
                 Request::builder()
@@ -113,7 +124,10 @@ mod tests {
     /// seam B: unknown routes should return 404.
     #[tokio::test]
     async fn unknown_route_returns_404() {
-        let app = build_router(minimal_state());
+        let app = build_router(
+            minimal_state(),
+            &crate::domain::settings::GatewaySettings::default(),
+        );
         let response = app
             .oneshot(
                 Request::builder()

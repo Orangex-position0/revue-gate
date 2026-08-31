@@ -40,6 +40,33 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Service Module enablement settings. Routes are mounted from this snapshot when the HTTP server starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ServiceModuleSettings {
+    pub knowledge: bool,
+    pub mcp: bool,
+}
+
+impl Default for ServiceModuleSettings {
+    fn default() -> Self {
+        Self {
+            knowledge: true,
+            mcp: true,
+        }
+    }
+}
+
+impl ServiceModuleSettings {
+    pub fn is_enabled(&self, module_id: &str) -> bool {
+        match module_id {
+            "knowledge" => self.knowledge,
+            "mcp" => self.mcp,
+            _ => false,
+        }
+    }
+}
+
 /// Gateway settings snapshot: every config item editable on the settings page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -60,6 +87,8 @@ pub struct GatewaySettings {
     pub retry: RetryPolicy,
     /// Request-time security audit policy controls.
     pub audit: AuditSettings,
+    /// Service Module route enablement; takes effect the next time the HTTP server starts.
+    pub service_modules: ServiceModuleSettings,
 }
 
 impl Default for GatewaySettings {
@@ -73,6 +102,7 @@ impl Default for GatewaySettings {
             autostart: false,
             retry: RetryPolicy::default(),
             audit: AuditSettings::default(),
+            service_modules: ServiceModuleSettings::default(),
         }
     }
 }
@@ -109,6 +139,8 @@ mod tests {
             scan_system in prop::bool::ANY,
             scan_byte_limit in 0u32..=1_000_000u32,
             store_payload in prop::bool::ANY,
+            knowledge in prop::bool::ANY,
+            mcp in prop::bool::ANY,
         ) {
             let settings = GatewaySettings {
                 host,
@@ -126,10 +158,32 @@ mod tests {
                     store_payload,
                     ..AuditSettings::default()
                 },
+                service_modules: ServiceModuleSettings { knowledge, mcp },
             };
             let value = serde_json::to_value(&settings).expect("serialize");
             let back: GatewaySettings = serde_json::from_value(value).expect("deserialize");
             prop_assert_eq!(back, settings);
         }
+    }
+
+    #[test]
+    fn old_settings_json_defaults_service_modules_to_enabled() {
+        let settings: GatewaySettings = serde_json::from_value(serde_json::json!({
+            "host": "127.0.0.1",
+            "port": 3456,
+            "theme": "system",
+            "minimizeToTray": false,
+            "closeToTray": false,
+            "autostart": false,
+            "retry": {
+                "enabled": true,
+                "max_retries": null
+            },
+            "audit": AuditSettings::default()
+        }))
+        .expect("deserialize old settings");
+
+        assert!(settings.service_modules.knowledge);
+        assert!(settings.service_modules.mcp);
     }
 }

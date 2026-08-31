@@ -112,6 +112,7 @@ export function SettingsPage() {
           ...settings.audit,
           scanByteLimit: parsedScanLimit,
         },
+        serviceModules: settings.serviceModules,
       });
       setSavedAt(new Date().toLocaleTimeString());
     } catch (error) {
