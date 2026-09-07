@@ -1,8 +1,14 @@
 //! Tauri management commands for local knowledge bases.
 
+use crate::domain::channel::ChannelRepository;
 use crate::domain::knowledge::*;
+use crate::infrastructure::providers::openai::OpenAiCompatibleEmbeddingClient;
+use crate::infrastructure::sqlite::channel::SqliteChannelRepository;
 use crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository;
-use crate::usecases::knowledge::{KnowledgeAdminUsecase, KnowledgeIngestionUsecase};
+use crate::usecases::knowledge::{
+    KnowledgeAdminUsecase, KnowledgeIngestionUsecase, LinearVectorBackend, QueryEmbedding,
+    retrieval::KnowledgeRetrievalUsecase,
+};
 use tauri::State;
 
 fn usecase(
@@ -111,4 +117,107 @@ pub async fn list_knowledge_sources(
     kb_id: String,
 ) -> Result<Vec<KbSource>, String> {
     repo.list_sources(&kb_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn search_knowledge(
+    repo: State<'_, SqliteKnowledgeRepository>,
+    channels: State<'_, SqliteChannelRepository>,
+    input: KnowledgeSearchInput,
+) -> Result<KnowledgeSearchResponse, String> {
+    let repo = std::sync::Arc::new((*repo.inner()).clone());
+    let query_embedding = std::sync::Arc::new(DynamicQueryEmbedding {
+        repo: repo.clone(),
+        channels: std::sync::Arc::new((*channels.inner()).clone()),
+    });
+    let index_reader = std::sync::Arc::new(LinearVectorBackend::new(repo.clone()));
+    KnowledgeRetrievalUsecase::new(query_embedding, index_reader, repo)
+        .search(input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_knowledge_conversation_messages(
+    repo: State<'_, SqliteKnowledgeRepository>,
+    kb_id: String,
+    conversation_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<ConversationMessage>, String> {
+    repo.list_conversation_messages(&kb_id, &conversation_id, limit.unwrap_or(50))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_knowledge_conversation(
+    repo: State<'_, SqliteKnowledgeRepository>,
+    kb_id: String,
+    conversation_id: String,
+) -> Result<(), String> {
+    repo.clear_conversation(&kb_id, &conversation_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+struct DynamicQueryEmbedding {
+    repo: std::sync::Arc<SqliteKnowledgeRepository>,
+    channels: std::sync::Arc<SqliteChannelRepository>,
+}
+
+#[async_trait::async_trait]
+impl crate::usecases::knowledge::retrieval::KnowledgeQueryEmbedding for DynamicQueryEmbedding {
+    async fn embed_query(
+        &self,
+        kb_id: &str,
+        query: &str,
+    ) -> Result<QueryEmbedding, EmbeddingError> {
+        let kb = self
+            .repo
+            .get_kb(kb_id)
+            .await?
+            .ok_or(crate::domain::error::RepositoryError::NotFound)?;
+        let model = kb
+            .embedding_model
+            .as_deref()
+            .ok_or(EmbeddingError::ConfigUnavailable)?;
+        let channels = self.channels.list().await?;
+        let channel = if let Some(channel_id) = kb.embedding_channel_id.as_deref() {
+            let id: uuid::Uuid = channel_id
+                .parse()
+                .map_err(|_| EmbeddingError::ConfigUnavailable)?;
+            channels
+                .into_iter()
+                .find(|channel| channel.id == id && channel.enabled)
+        } else {
+            channels
+                .into_iter()
+                .filter(|channel| channel.enabled)
+                .find(|channel| {
+                    channel.models.is_empty()
+                        || channel.models.iter().any(|candidate| candidate == model)
+                        || channel
+                            .model_mappings
+                            .iter()
+                            .any(|mapping| mapping.client_model == model)
+                })
+        }
+        .ok_or(EmbeddingError::ConfigUnavailable)?;
+        let mut vectors = OpenAiCompatibleEmbeddingClient::new(channel)
+            .embed(model, vec![query.to_string()])
+            .await?;
+        let vector = vectors.pop().ok_or(EmbeddingError::InvalidResponse)?;
+        let expected = kb.embedding_dim.max(0) as usize;
+        if expected > 0 && vector.len() != expected {
+            return Err(EmbeddingError::DimensionMismatch {
+                expected,
+                actual: vector.len(),
+            });
+        }
+        Ok(QueryEmbedding {
+            kb_id: kb_id.to_string(),
+            model: model.to_string(),
+            vector,
+        })
+    }
 }

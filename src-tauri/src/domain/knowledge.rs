@@ -25,6 +25,311 @@ text_enum!(KbTaskType { ImportSource => "import_source", SyncSource => "sync_sou
 text_enum!(KbTaskStatus { Pending => "pending", Running => "running", Succeeded => "succeeded", Failed => "failed" });
 text_enum!(KbIndexStatus { None => "none", NeedsEmbedding => "needs_embedding", Embedding => "embedding", NeedsFtsRebuild => "needs_fts_rebuild", FtsBuilding => "fts_building", NeedsHnswRebuild => "needs_hnsw_rebuild", HnswBuilding => "hnsw_building", Ready => "ready", Failed => "failed" });
 text_enum!(ConversationRole { User => "user", Assistant => "assistant" });
+text_enum!(KnowledgeSearchMode { Hybrid => "hybrid", Vector => "vector", Keyword => "keyword" });
+text_enum!(FusionStrategy { Rrf => "rrf" });
+text_enum!(RagClientKind { ExternalHttp => "external_http", TauriUi => "tauri_ui", Mcp => "mcp" });
+
+impl Default for KnowledgeSearchMode {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+impl Default for FusionStrategy {
+    fn default() -> Self {
+        Self::Rrf
+    }
+}
+
+pub fn default_search_limit() -> usize {
+    8
+}
+
+pub fn default_rag_model() -> String {
+    "gpt-4o-mini".to_string()
+}
+
+fn default_temperature() -> Option<f32> {
+    Some(0.2)
+}
+
+fn default_context_token_budget() -> usize {
+    6_000
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchScope {
+    #[serde(default)]
+    pub kb_ids: Vec<String>,
+    #[serde(default)]
+    pub all_enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchFilters {
+    pub doc_id: Option<String>,
+    pub source_id: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionConfig {
+    #[serde(default)]
+    pub strategy: FusionStrategy,
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f32,
+}
+
+fn default_rrf_k() -> f32 {
+    60.0
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            strategy: FusionStrategy::Rrf,
+            rrf_k: default_rrf_k(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchInput {
+    pub query: String,
+    pub kb_id: Option<String>,
+    #[serde(default)]
+    pub scope: KnowledgeSearchScope,
+    #[serde(default)]
+    pub mode: KnowledgeSearchMode,
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub filters: KnowledgeSearchFilters,
+    #[serde(default)]
+    pub fusion: FusionConfig,
+    #[serde(default)]
+    pub mcp_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchResponse {
+    pub query: String,
+    pub requested_mode: KnowledgeSearchMode,
+    pub actual_mode: KnowledgeSearchMode,
+    pub results: Vec<KnowledgeSearchResult>,
+    #[serde(default)]
+    pub warnings: Vec<KnowledgeSearchWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchResult {
+    pub kb_id: String,
+    pub chunk_id: String,
+    pub score: f32,
+    pub vector_score: Option<f32>,
+    pub keyword_score: Option<f32>,
+    pub vector_rank: Option<usize>,
+    pub keyword_rank: Option<usize>,
+    pub snippet: String,
+    pub citation: Citation,
+    #[serde(skip)]
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Citation {
+    pub citation_id: String,
+    pub kb_id: String,
+    pub doc_id: String,
+    pub chunk_id: String,
+    pub chunk_index: i64,
+    pub document_revision: i64,
+    pub filename: Option<String>,
+    pub file_path: Option<String>,
+    pub source_id: Option<String>,
+    pub source_type: Option<String>,
+    pub source_uri: Option<String>,
+    pub symbol_name: Option<String>,
+    pub symbol_kind: Option<String>,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeSearchWarning {
+    pub code: String,
+    pub message: String,
+    pub kb_id: Option<String>,
+}
+
+impl KnowledgeSearchWarning {
+    pub fn new(code: impl Into<String>, message: impl Into<String>, kb_id: Option<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            kb_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeAskInput {
+    pub question: String,
+    pub kb_id: Option<String>,
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub search: KnowledgeAskSearchOptions,
+    #[serde(default)]
+    pub answer: KnowledgeAnswerOptions,
+    #[serde(default)]
+    pub history: Vec<ConversationMessage>,
+    #[serde(default)]
+    pub mcp_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeAskSearchOptions {
+    #[serde(default)]
+    pub scope: KnowledgeSearchScope,
+    #[serde(default)]
+    pub mode: KnowledgeSearchMode,
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub filters: KnowledgeSearchFilters,
+}
+
+impl Default for KnowledgeAskSearchOptions {
+    fn default() -> Self {
+        Self {
+            scope: KnowledgeSearchScope::default(),
+            mode: KnowledgeSearchMode::Hybrid,
+            limit: default_search_limit(),
+            filters: KnowledgeSearchFilters::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeAnswerOptions {
+    #[serde(default = "default_rag_model")]
+    pub model: String,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default = "default_temperature")]
+    pub temperature: Option<f32>,
+    pub max_output_tokens: Option<u32>,
+    #[serde(default = "default_context_token_budget")]
+    pub context_token_budget: usize,
+}
+
+impl Default for KnowledgeAnswerOptions {
+    fn default() -> Self {
+        Self {
+            model: default_rag_model(),
+            stream: false,
+            temperature: default_temperature(),
+            max_output_tokens: None,
+            context_token_budget: default_context_token_budget(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagAnswer {
+    pub answer: String,
+    pub conversation_id: Option<String>,
+    pub retrieval: KnowledgeSearchResponse,
+    pub sources: Vec<Citation>,
+    pub usage: Option<UsageInfo>,
+    #[serde(default)]
+    pub warnings: Vec<KnowledgeSearchWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    pub role: ConversationRole,
+    pub content: String,
+    pub sources_json: Option<String>,
+    pub retrieval_json: Option<String>,
+    pub warnings_json: Option<String>,
+    pub model: Option<String>,
+    pub token_usage_json: Option<String>,
+    pub caller_kind: Option<String>,
+    pub trace_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageInfo {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RagAuthContext {
+    pub client_kind: RagClientKind,
+    pub bearer_token: Option<String>,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KnowledgeRetrievalError {
+    #[error("query_required")]
+    QueryRequired,
+    #[error("search_scope_required")]
+    SearchScopeRequired,
+    #[error("knowledge_base_not_found")]
+    KnowledgeBaseNotFound,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("index_not_ready")]
+    IndexNotReady,
+    #[error("vector_index_not_ready")]
+    VectorIndexNotReady,
+    #[error("keyword_index_not_ready")]
+    KeywordIndexNotReady,
+    #[error("{0}")]
+    Repository(#[from] RepositoryError),
+    #[error("{0}")]
+    Embedding(#[from] EmbeddingError),
+    #[error("{0}")]
+    Index(#[from] IndexError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KnowledgeRagError {
+    #[error("{0}")]
+    Retrieval(#[from] KnowledgeRetrievalError),
+    #[error("missing_local_api_key")]
+    MissingLocalApiKey,
+    #[error("streaming_not_supported")]
+    StreamingNotSupported,
+    #[error("invalid_model_response")]
+    InvalidModelResponse,
+    #[error("{0}")]
+    Repository(#[from] RepositoryError),
+    #[error("{0}")]
+    Proxy(#[from] crate::usecases::proxy::ProxyError),
+    #[error("{0}")]
+    Serialization(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -505,6 +810,29 @@ pub trait KnowledgeRepository: Send + Sync {
     async fn mark_task_failed(&self, task_id: &str, error: String) -> Result<(), RepositoryError>;
     async fn recompute_stats(&self, kb_id: &str) -> Result<KbStats, RepositoryError>;
     async fn service_stats(&self) -> Result<KnowledgeServiceStats, RepositoryError>;
+    async fn save_conversation_message(
+        &self,
+        _kb_id: &str,
+        _conversation_id: &str,
+        _message: ConversationMessage,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
+    async fn list_conversation_messages(
+        &self,
+        _kb_id: &str,
+        _conversation_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<ConversationMessage>, RepositoryError> {
+        Ok(Vec::new())
+    }
+    async fn clear_conversation(
+        &self,
+        _kb_id: &str,
+        _conversation_id: &str,
+    ) -> Result<(), RepositoryError> {
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]

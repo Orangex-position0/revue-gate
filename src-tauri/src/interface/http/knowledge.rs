@@ -3,7 +3,7 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,16 +16,21 @@ use crate::infrastructure::providers::openai::OpenAiCompatibleEmbeddingClient;
 use crate::interface::http::handlers::AppState;
 use crate::usecases::knowledge::{
     EmbedChunksReport, EmbeddingUsecase, FtsRebuildReport, KnowledgeAdminUsecase,
-    KnowledgeIngestionUsecase,
+    KnowledgeIngestionUsecase, LinearVectorBackend, QueryEmbedding, rag::KnowledgeRagUsecase,
+    retrieval::KnowledgeRetrievalUsecase,
 };
 
 pub fn create_knowledge_router() -> Router<AppState> {
     Router::new()
         .route("/api/kb", get(list_kbs).post(create_kb))
+        .route("/api/kb/search", post(search_knowledge_global))
+        .route("/api/kb/ask", post(ask_knowledge_global))
         .route(
             "/api/kb/{kb_id}",
             get(get_kb).put(update_kb).delete(delete_kb),
         )
+        .route("/api/kb/{kb_id}/search", post(search_knowledge))
+        .route("/api/kb/{kb_id}/ask", post(ask_knowledge))
         .route("/api/kb/{kb_id}/stats", get(stats))
         .route("/api/kb/{kb_id}/stats/recompute", post(stats))
         .route(
@@ -265,6 +270,170 @@ async fn list_tasks(
     Ok(Json(repo(&state)?.list_tasks(&id).await?))
 }
 
+async fn search_knowledge_global(
+    State(state): State<AppState>,
+    Json(input): Json<KnowledgeSearchInput>,
+) -> Result<Json<KnowledgeSearchResponse>, ApiError> {
+    Ok(Json(search_usecase(&state).await?.search(input).await?))
+}
+
+async fn search_knowledge(
+    State(state): State<AppState>,
+    Path(kb_id): Path<String>,
+    Json(mut input): Json<KnowledgeSearchInput>,
+) -> Result<Json<KnowledgeSearchResponse>, ApiError> {
+    override_path_kb_id(&mut input.kb_id, kb_id)?;
+    Ok(Json(search_usecase(&state).await?.search(input).await?))
+}
+
+async fn ask_knowledge_global(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<KnowledgeAskInput>,
+) -> Result<Json<RagAnswer>, ApiError> {
+    Ok(Json(ask_with_state(&state, headers, input).await?))
+}
+
+async fn ask_knowledge(
+    State(state): State<AppState>,
+    Path(kb_id): Path<String>,
+    headers: HeaderMap,
+    Json(mut input): Json<KnowledgeAskInput>,
+) -> Result<Json<RagAnswer>, ApiError> {
+    override_path_kb_id(&mut input.kb_id, kb_id)?;
+    Ok(Json(ask_with_state(&state, headers, input).await?))
+}
+
+async fn ask_with_state(
+    state: &AppState,
+    headers: HeaderMap,
+    input: KnowledgeAskInput,
+) -> Result<RagAnswer, ApiError> {
+    let repository = repo(state)?;
+    let retrieval = Arc::new(search_usecase(state).await?);
+    let rag = KnowledgeRagUsecase::new(retrieval, repository, state.proxy.clone());
+    rag.ask(
+        input,
+        RagAuthContext {
+            client_kind: RagClientKind::ExternalHttp,
+            bearer_token: extract_bearer(&headers),
+            trace_id: headers
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+        },
+    )
+    .await
+    .map_err(ApiError::from)
+}
+
+async fn search_usecase(
+    state: &AppState,
+) -> Result<
+    KnowledgeRetrievalUsecase<
+        DynamicQueryEmbedding,
+        LinearVectorBackend<crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository>,
+        crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository,
+    >,
+    ApiError,
+> {
+    let repository = repo(state)?;
+    let query_embedding = Arc::new(DynamicQueryEmbedding {
+        repo: repository.clone(),
+        channels: state.channel_repo.clone(),
+    });
+    let index_reader = Arc::new(LinearVectorBackend::new(repository.clone()));
+    Ok(KnowledgeRetrievalUsecase::new(
+        query_embedding,
+        index_reader,
+        repository,
+    ))
+}
+
+fn override_path_kb_id(target: &mut Option<String>, path_kb_id: String) -> Result<(), ApiError> {
+    if target
+        .as_deref()
+        .is_some_and(|body_kb_id| body_kb_id != path_kb_id)
+    {
+        return Err(ApiError::BadRequest("path_kb_id_conflicts_with_body_kb_id"));
+    }
+    *target = Some(path_kb_id);
+    Ok(())
+}
+
+fn extract_bearer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+struct DynamicQueryEmbedding {
+    repo: Arc<crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository>,
+    channels: Arc<dyn crate::domain::channel::ChannelRepository>,
+}
+
+#[async_trait::async_trait]
+impl crate::usecases::knowledge::retrieval::KnowledgeQueryEmbedding for DynamicQueryEmbedding {
+    async fn embed_query(
+        &self,
+        kb_id: &str,
+        query: &str,
+    ) -> Result<QueryEmbedding, EmbeddingError> {
+        let kb = self
+            .repo
+            .get_kb(kb_id)
+            .await?
+            .ok_or(RepositoryError::NotFound)?;
+        let model = kb
+            .embedding_model
+            .as_deref()
+            .ok_or(EmbeddingError::ConfigUnavailable)?;
+        let channels = self.channels.list().await?;
+        let channel = if let Some(channel_id) = kb.embedding_channel_id.as_deref() {
+            let id: uuid::Uuid = channel_id
+                .parse()
+                .map_err(|_| EmbeddingError::ConfigUnavailable)?;
+            channels
+                .into_iter()
+                .find(|channel| channel.id == id && channel.enabled)
+        } else {
+            channels
+                .into_iter()
+                .filter(|channel| channel.enabled)
+                .find(|channel| {
+                    channel.models.is_empty()
+                        || channel.models.iter().any(|candidate| candidate == model)
+                        || channel
+                            .model_mappings
+                            .iter()
+                            .any(|mapping| mapping.client_model == model)
+                })
+        }
+        .ok_or(EmbeddingError::ConfigUnavailable)?;
+        let mut vectors = OpenAiCompatibleEmbeddingClient::new(channel)
+            .embed(model, vec![query.to_string()])
+            .await?;
+        let vector = vectors.pop().ok_or(EmbeddingError::InvalidResponse)?;
+        let expected = kb.embedding_dim.max(0) as usize;
+        if expected > 0 && vector.len() != expected {
+            return Err(EmbeddingError::DimensionMismatch {
+                expected,
+                actual: vector.len(),
+            });
+        }
+        Ok(QueryEmbedding {
+            kb_id: kb_id.to_string(),
+            model: model.to_string(),
+            vector,
+        })
+    }
+}
+
 async fn embedding_client(
     state: &AppState,
     kb_id: &str,
@@ -308,6 +477,8 @@ async fn embedding_client(
 
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
+    #[error("{0}")]
+    BadRequest(&'static str),
     #[error("not_found")]
     NotFound,
     #[error("knowledge_service_unavailable")]
@@ -326,12 +497,37 @@ enum ApiError {
     Embedding(#[from] crate::domain::knowledge::EmbeddingError),
     #[error("{0}")]
     Index(#[from] crate::domain::knowledge::IndexError),
+    #[error("{0}")]
+    Retrieval(#[from] crate::domain::knowledge::KnowledgeRetrievalError),
+    #[error("{0}")]
+    Rag(#[from] crate::domain::knowledge::KnowledgeRagError),
+    #[error("{0}")]
+    Proxy(#[from] crate::usecases::proxy::ProxyError),
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound | Self::Repository(RepositoryError::NotFound) => StatusCode::NOT_FOUND,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Rag(crate::domain::knowledge::KnowledgeRagError::MissingLocalApiKey) => {
+                StatusCode::UNAUTHORIZED
+            }
+            Self::Retrieval(
+                crate::domain::knowledge::KnowledgeRetrievalError::QueryRequired
+                | crate::domain::knowledge::KnowledgeRetrievalError::SearchScopeRequired,
+            ) => StatusCode::BAD_REQUEST,
+            Self::Retrieval(crate::domain::knowledge::KnowledgeRetrievalError::Forbidden) => {
+                StatusCode::FORBIDDEN
+            }
+            Self::Retrieval(
+                crate::domain::knowledge::KnowledgeRetrievalError::KnowledgeBaseNotFound,
+            ) => StatusCode::NOT_FOUND,
+            Self::Retrieval(
+                crate::domain::knowledge::KnowledgeRetrievalError::IndexNotReady
+                | crate::domain::knowledge::KnowledgeRetrievalError::VectorIndexNotReady
+                | crate::domain::knowledge::KnowledgeRetrievalError::KeywordIndexNotReady,
+            ) => StatusCode::CONFLICT,
             Self::Parse(_) | Self::Split(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Knowledge(

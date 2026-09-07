@@ -294,6 +294,76 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
     async fn service_stats(&self) -> Result<KnowledgeServiceStats, RepositoryError> {
         sqlx::query_as::<_,(i64,i64,i64,i64)>("SELECT (SELECT COUNT(*) FROM kb_knowledge_bases),(SELECT COUNT(*) FROM kb_documents WHERE status='ready'),(SELECT COUNT(*) FROM kb_tasks WHERE status IN ('pending','running')),(SELECT COUNT(*) FROM kb_tasks WHERE status='failed')").fetch_one(&self.pool).await.map(|v|KnowledgeServiceStats{knowledge_bases:v.0,ready_documents:v.1,pending_tasks:v.2,failed_tasks:v.3}).map_err(db_err)
     }
+
+    async fn save_conversation_message(
+        &self,
+        kb_id: &str,
+        conversation_id: &str,
+        message: ConversationMessage,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO kb_conversations(
+                id,kb_id,conversation_id,role,content,sources_json,retrieval_json,warnings_json,
+                model,token_usage_json,caller_kind,trace_id,created_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(kb_id)
+        .bind(conversation_id)
+        .bind(message.role.to_string())
+        .bind(message.content)
+        .bind(message.sources_json)
+        .bind(message.retrieval_json)
+        .bind(message.warnings_json)
+        .bind(message.model)
+        .bind(message.token_usage_json)
+        .bind(message.caller_kind)
+        .bind(message.trace_id)
+        .bind(message.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn list_conversation_messages(
+        &self,
+        kb_id: &str,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationMessage>, RepositoryError> {
+        sqlx::query_as::<_, ConversationMessage>(
+            "SELECT role,content,sources_json,retrieval_json,warnings_json,model,token_usage_json,caller_kind,trace_id,created_at
+             FROM kb_conversations
+             WHERE kb_id=? AND conversation_id=?
+             ORDER BY created_at DESC,id DESC
+             LIMIT ?",
+        )
+        .bind(kb_id)
+        .bind(conversation_id)
+        .bind(limit.clamp(1, 200) as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map(|mut rows| {
+            rows.reverse();
+            rows
+        })
+        .map_err(db_err)
+    }
+
+    async fn clear_conversation(
+        &self,
+        kb_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query("DELETE FROM kb_conversations WHERE kb_id=? AND conversation_id=?")
+            .bind(kb_id)
+            .bind(conversation_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]

@@ -25,9 +25,10 @@ use interface::commands::channel::{
     test_channel, update_channel,
 };
 use interface::commands::knowledge::{
-    create_knowledge_base, create_knowledge_source, delete_knowledge_base, get_knowledge_base,
-    get_knowledge_base_index_status, list_knowledge_bases, list_knowledge_documents,
-    list_knowledge_sources, rebuild_knowledge_fts_index, update_knowledge_base,
+    clear_knowledge_conversation, create_knowledge_base, create_knowledge_source,
+    delete_knowledge_base, get_knowledge_base, get_knowledge_base_index_status,
+    list_knowledge_bases, list_knowledge_conversation_messages, list_knowledge_documents,
+    list_knowledge_sources, rebuild_knowledge_fts_index, search_knowledge, update_knowledge_base,
     upload_knowledge_document,
 };
 use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, list_logs};
@@ -180,6 +181,9 @@ pub fn run() {
             rebuild_knowledge_fts_index,
             create_knowledge_source,
             list_knowledge_sources,
+            search_knowledge,
+            list_knowledge_conversation_messages,
+            clear_knowledge_conversation,
         ])
         // Window events: close-to-tray / minimize-to-tray. Events fire only after setup completes,
         // when the shared settings state is registered (try_state as a fallback to avoid a pre-setup panic).

@@ -1,5 +1,11 @@
 //! Knowledge ingestion, parsing and splitting use cases.
 
+pub mod citation;
+pub mod fusion;
+pub mod rag;
+pub mod retrieval;
+pub mod token_budget;
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;

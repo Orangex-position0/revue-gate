@@ -39,6 +39,7 @@ const SELECT_COLUMNS: &str = "id, name, channel_type, base_url, api_key, models,
      weight, model_mappings, enabled, last_test_at, last_test_ok, created_at, updated_at";
 
 /// ChannelRepository implementation backed by an sqlx pool.
+#[derive(Clone)]
 pub struct SqliteChannelRepository {
     pool: SqlitePool,
 }
