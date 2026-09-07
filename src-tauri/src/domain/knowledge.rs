@@ -113,6 +113,23 @@ pub struct KbChunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
+pub struct KbIndexMeta {
+    pub kb_id: String,
+    pub index_type: String,
+    pub embedding_dim: i64,
+    pub chunk_count: i64,
+    pub embedded_count: i64,
+    pub fts_status: String,
+    pub hnsw_status: String,
+    pub index_path: Option<String>,
+    pub built_at: Option<String>,
+    pub status: KbIndexStatus,
+    pub error_message: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
 pub struct KbTask {
     pub id: String,
     pub kb_id: String,
@@ -217,6 +234,116 @@ pub struct CreateTaskInput {
     pub doc_id: Option<String>,
     pub task_type: KbTaskType,
     pub payload_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorHit {
+    pub chunk_id: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct KeywordHit {
+    pub chunk_id: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkEmbeddingUpdate {
+    pub chunk_id: String,
+    pub embedding: Vec<u8>,
+    pub embedding_dim: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateIndexMetaInput {
+    pub kb_id: String,
+    pub index_type: String,
+    pub embedding_dim: i64,
+    pub chunk_count: i64,
+    pub embedded_count: i64,
+    pub fts_status: String,
+    pub hnsw_status: String,
+    pub index_path: Option<String>,
+    pub status: KbIndexStatus,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexHealth {
+    pub ready_chunk_count: i64,
+    pub embedded_count: i64,
+    pub embedding_running: bool,
+    pub fts_status: KbIndexStatus,
+    pub hnsw_status: KbIndexStatus,
+    pub hnsw_required: bool,
+    pub last_error: Option<String>,
+}
+
+pub fn derive_index_status(health: &IndexHealth) -> KbIndexStatus {
+    if health.last_error.is_some() {
+        return KbIndexStatus::Failed;
+    }
+    if health.ready_chunk_count == 0 {
+        return KbIndexStatus::None;
+    }
+    if health.embedding_running {
+        return KbIndexStatus::Embedding;
+    }
+    if health.embedded_count < health.ready_chunk_count {
+        return KbIndexStatus::NeedsEmbedding;
+    }
+    if health.fts_status == KbIndexStatus::FtsBuilding {
+        return KbIndexStatus::FtsBuilding;
+    }
+    if health.fts_status != KbIndexStatus::Ready {
+        return KbIndexStatus::NeedsFtsRebuild;
+    }
+    if health.hnsw_required {
+        if health.hnsw_status == KbIndexStatus::HnswBuilding {
+            return KbIndexStatus::HnswBuilding;
+        }
+        if health.hnsw_status != KbIndexStatus::Ready {
+            return KbIndexStatus::NeedsHnswRebuild;
+        }
+    }
+    KbIndexStatus::Ready
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IndexError {
+    #[error("{0}")]
+    Repository(#[from] RepositoryError),
+    #[error("invalid_embedding_blob")]
+    InvalidEmbeddingBlob,
+    #[error("embedding_dimension_mismatch: expected {expected}, actual {actual}")]
+    DimensionMismatch { expected: usize, actual: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EmbeddingError {
+    #[error("{0}")]
+    Repository(#[from] RepositoryError),
+    #[error("embedding_config_unavailable")]
+    ConfigUnavailable,
+    #[error("embedding_request_failed: {0}")]
+    RequestFailed(String),
+    #[error("invalid_embedding_response")]
+    InvalidResponse,
+    #[error("embedding_dimension_mismatch: expected {expected}, actual {actual}")]
+    DimensionMismatch { expected: usize, actual: usize },
+}
+
+#[async_trait::async_trait]
+pub trait EmbeddingClient: Send + Sync {
+    async fn embed(
+        &self,
+        model: &str,
+        inputs: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
@@ -378,6 +505,52 @@ pub trait KnowledgeRepository: Send + Sync {
     async fn mark_task_failed(&self, task_id: &str, error: String) -> Result<(), RepositoryError>;
     async fn recompute_stats(&self, kb_id: &str) -> Result<KbStats, RepositoryError>;
     async fn service_stats(&self) -> Result<KnowledgeServiceStats, RepositoryError>;
+}
+
+#[async_trait::async_trait]
+pub trait KnowledgeIndexRepository: Send + Sync {
+    async fn list_chunks_missing_embedding(
+        &self,
+        kb_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KbChunk>, RepositoryError>;
+    async fn update_chunk_embeddings(
+        &self,
+        updates: Vec<ChunkEmbeddingUpdate>,
+    ) -> Result<(), RepositoryError>;
+    async fn clear_embeddings_for_kb(&self, kb_id: &str) -> Result<(), RepositoryError>;
+    async fn sync_fts_rows_for_document(
+        &self,
+        kb_id: &str,
+        document_id: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn rebuild_fts_for_kb(&self, kb_id: &str) -> Result<(), RepositoryError>;
+    async fn get_index_meta(&self, kb_id: &str) -> Result<KbIndexMeta, RepositoryError>;
+    async fn update_index_meta(&self, input: UpdateIndexMetaInput) -> Result<(), RepositoryError>;
+    async fn refresh_index_summary(&self, kb_id: &str) -> Result<KbIndexMeta, RepositoryError>;
+    async fn keyword_search(
+        &self,
+        kb_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KeywordHit>, RepositoryError>;
+}
+
+#[async_trait::async_trait]
+pub trait KnowledgeIndexReader: Send + Sync {
+    async fn vector_search(
+        &self,
+        kb_id: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<VectorHit>, IndexError>;
+    async fn keyword_search(
+        &self,
+        kb_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KeywordHit>, IndexError>;
+    async fn index_status(&self, kb_id: &str) -> Result<KbIndexMeta, IndexError>;
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

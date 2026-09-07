@@ -12,8 +12,12 @@ use std::sync::Arc;
 
 use crate::domain::error::RepositoryError;
 use crate::domain::knowledge::*;
+use crate::infrastructure::providers::openai::OpenAiCompatibleEmbeddingClient;
 use crate::interface::http::handlers::AppState;
-use crate::usecases::knowledge::{KnowledgeAdminUsecase, KnowledgeIngestionUsecase};
+use crate::usecases::knowledge::{
+    EmbedChunksReport, EmbeddingUsecase, FtsRebuildReport, KnowledgeAdminUsecase,
+    KnowledgeIngestionUsecase,
+};
 
 pub fn create_knowledge_router() -> Router<AppState> {
     Router::new()
@@ -24,6 +28,15 @@ pub fn create_knowledge_router() -> Router<AppState> {
         )
         .route("/api/kb/{kb_id}/stats", get(stats))
         .route("/api/kb/{kb_id}/stats/recompute", post(stats))
+        .route(
+            "/api/kb/{kb_id}/index",
+            get(index_status).post(rebuild_index),
+        )
+        .route("/api/kb/{kb_id}/fts/rebuild", post(rebuild_fts))
+        .route(
+            "/api/kb/{kb_id}/embeddings/rebuild",
+            post(rebuild_embeddings),
+        )
         .route(
             "/api/kb/{kb_id}/documents",
             get(list_documents).post(upload_document),
@@ -106,6 +119,48 @@ async fn stats(
     Path(id): Path<String>,
 ) -> Result<Json<KbStats>, ApiError> {
     Ok(Json(repo(&state)?.recompute_stats(&id).await?))
+}
+async fn index_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<KbIndexMeta>, ApiError> {
+    Ok(Json(repo(&state)?.refresh_index_summary(&id).await?))
+}
+async fn rebuild_fts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<FtsRebuildReport>, ApiError> {
+    let repository = repo(&state)?;
+    repository.rebuild_fts_for_kb(&id).await?;
+    let meta = repository.refresh_index_summary(&id).await?;
+    Ok(Json(FtsRebuildReport {
+        kb_id: id,
+        indexed_chunks: meta.chunk_count as usize,
+    }))
+}
+async fn rebuild_embeddings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<EmbedChunksReport>, ApiError> {
+    let repository = repo(&state)?;
+    let client = Arc::new(embedding_client(&state, &id).await?);
+    Ok(Json(
+        EmbeddingUsecase::new(repository, client)
+            .embed_ready_chunks(&id, None)
+            .await?,
+    ))
+}
+async fn rebuild_index(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<KbIndexMeta>, ApiError> {
+    let repository = repo(&state)?;
+    let client = Arc::new(embedding_client(&state, &id).await?);
+    EmbeddingUsecase::new(repository.clone(), client)
+        .embed_ready_chunks(&id, None)
+        .await?;
+    repository.rebuild_fts_for_kb(&id).await?;
+    Ok(Json(repository.refresh_index_summary(&id).await?))
 }
 async fn list_documents(
     State(state): State<AppState>,
@@ -210,6 +265,47 @@ async fn list_tasks(
     Ok(Json(repo(&state)?.list_tasks(&id).await?))
 }
 
+async fn embedding_client(
+    state: &AppState,
+    kb_id: &str,
+) -> Result<OpenAiCompatibleEmbeddingClient, ApiError> {
+    let kb = repo(state)?
+        .get_kb(kb_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let model = kb
+        .embedding_model
+        .as_deref()
+        .ok_or(ApiError::Conflict("embedding_model_required"))?;
+    if let Some(channel_id) = kb.embedding_channel_id.as_deref() {
+        let id = channel_id
+            .parse()
+            .map_err(|_| ApiError::Conflict("invalid_embedding_channel_id"))?;
+        let channel = state
+            .channel_repo
+            .find_by_id(id)
+            .await?
+            .ok_or(ApiError::Conflict("embedding_channel_not_found"))?;
+        return Ok(OpenAiCompatibleEmbeddingClient::new(channel));
+    }
+    let channel = state
+        .channel_repo
+        .list()
+        .await?
+        .into_iter()
+        .filter(|channel| channel.enabled)
+        .find(|channel| {
+            channel.models.is_empty()
+                || channel.models.iter().any(|candidate| candidate == model)
+                || channel
+                    .model_mappings
+                    .iter()
+                    .any(|mapping| mapping.client_model == model)
+        })
+        .ok_or(ApiError::Conflict("embedding_channel_not_found"))?;
+    Ok(OpenAiCompatibleEmbeddingClient::new(channel))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ApiError {
     #[error("not_found")]
@@ -226,6 +322,10 @@ enum ApiError {
     Split(#[from] crate::usecases::knowledge::SplitError),
     #[error("{0}")]
     Repository(#[from] RepositoryError),
+    #[error("{0}")]
+    Embedding(#[from] crate::domain::knowledge::EmbeddingError),
+    #[error("{0}")]
+    Index(#[from] crate::domain::knowledge::IndexError),
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -257,4 +357,5 @@ pub const KNOWLEDGE_MCP_TOOLS: &[&str] = &[
     "read_document",
     "upload_document",
     "sync_source",
+    "get_knowledge_base_index_status",
 ];

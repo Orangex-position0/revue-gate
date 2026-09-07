@@ -26,7 +26,8 @@ use interface::commands::channel::{
 };
 use interface::commands::knowledge::{
     create_knowledge_base, create_knowledge_source, delete_knowledge_base, get_knowledge_base,
-    list_knowledge_bases, list_knowledge_documents, list_knowledge_sources, update_knowledge_base,
+    get_knowledge_base_index_status, list_knowledge_bases, list_knowledge_documents,
+    list_knowledge_sources, rebuild_knowledge_fts_index, update_knowledge_base,
     upload_knowledge_document,
 };
 use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, list_logs};
@@ -170,11 +171,13 @@ pub fn run() {
             usage_stats,
             list_knowledge_bases,
             get_knowledge_base,
+            get_knowledge_base_index_status,
             create_knowledge_base,
             update_knowledge_base,
             delete_knowledge_base,
             upload_knowledge_document,
             list_knowledge_documents,
+            rebuild_knowledge_fts_index,
             create_knowledge_source,
             list_knowledge_sources,
         ])

@@ -12,6 +12,7 @@ use reqwest::Client;
 use serde_json::Value;
 
 use crate::domain::channel::{Channel, ChannelType};
+use crate::domain::knowledge::{EmbeddingClient, EmbeddingError};
 use crate::domain::provider::{
     BoxStream, ChatRequest, ProviderAdaptor, ProviderError, ProviderResponse, StreamEvent,
     TestResult, TokenUsage,
@@ -25,6 +26,98 @@ use crate::infrastructure::providers::{
 pub struct OpenAiCompatibleAdaptor {
     channel_type: ChannelType,
     client: Client,
+}
+
+pub struct OpenAiCompatibleEmbeddingClient {
+    channel: Channel,
+    channel_type: ChannelType,
+    client: Client,
+}
+
+impl OpenAiCompatibleEmbeddingClient {
+    pub fn new(channel: Channel) -> Self {
+        Self {
+            channel_type: channel.channel_type,
+            channel,
+            client: Client::new(),
+        }
+    }
+
+    fn default_base_url(&self) -> Option<&'static str> {
+        match self.channel_type {
+            ChannelType::OpenAi => Some("https://api.openai.com/v1"),
+            ChannelType::DeepSeek => Some("https://api.deepseek.com/v1"),
+            _ => None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddingClient for OpenAiCompatibleEmbeddingClient {
+    async fn embed(
+        &self,
+        model: &str,
+        inputs: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        let base_url = resolve_base_url(&self.channel, self.default_base_url())
+            .map_err(|e| EmbeddingError::RequestFailed(e.to_string()))?;
+        let api_key = require_api_key(&self.channel)
+            .map_err(|e| EmbeddingError::RequestFailed(e.to_string()))?;
+        let url = format!("{}/embeddings", base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&serde_json::json!({
+                "model": model,
+                "input": inputs,
+            }))
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::RequestFailed(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(EmbeddingError::RequestFailed(format!(
+                "upstream embedding request failed with status {status}"
+            )));
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|_| EmbeddingError::InvalidResponse)?;
+        parse_embedding_vectors(&value)
+    }
+}
+
+fn parse_embedding_vectors(value: &Value) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    let data = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or(EmbeddingError::InvalidResponse)?;
+    let mut items = data
+        .iter()
+        .map(|item| {
+            let index = item
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or(EmbeddingError::InvalidResponse)? as usize;
+            let embedding = item
+                .get("embedding")
+                .and_then(Value::as_array)
+                .ok_or(EmbeddingError::InvalidResponse)?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .map(|value| value as f32)
+                        .ok_or(EmbeddingError::InvalidResponse)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((index, embedding))
+        })
+        .collect::<Result<Vec<_>, EmbeddingError>>()?;
+    items.sort_by_key(|(index, _)| *index);
+    Ok(items.into_iter().map(|(_, vector)| vector).collect())
 }
 
 impl OpenAiCompatibleAdaptor {

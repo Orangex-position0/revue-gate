@@ -12,6 +12,7 @@ const DOC_COLUMNS: &str = "id,kb_id,source_id,filename,file_path,file_type,file_
 const CHUNK_COLUMNS: &str = "id,doc_id,kb_id,chunk_index,document_revision,content,token_count,embedding,embedding_dim,metadata,symbol_name,symbol_kind,created_at";
 const SOURCE_COLUMNS: &str = "id,kb_id,source_type,source_url,source_path,branch,status,file_count,error,created_at,updated_at";
 const TASK_COLUMNS: &str = "id,kb_id,source_id,doc_id,task_type,status,progress,total_items,done_items,payload_json,error_message,created_at,started_at,completed_at";
+const INDEX_META_COLUMNS: &str = "kb_id,index_type,embedding_dim,chunk_count,embedded_count,fts_status,hnsw_status,index_path,built_at,status,error_message,updated_at";
 
 #[derive(Clone)]
 pub struct SqliteKnowledgeRepository {
@@ -125,6 +126,11 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
         let revision = old_revision + 1;
         let now = chrono::Utc::now().to_rfc3339();
         let token_count: i64 = chunks.iter().map(|c| c.token_count).sum();
+        sqlx::query("DELETE FROM kb_chunks_fts WHERE doc_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         sqlx::query("DELETE FROM kb_chunks WHERE doc_id=?")
             .bind(id)
             .execute(&mut *tx)
@@ -135,6 +141,7 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
         for chunk in chunks {
             insert_chunk(&mut tx, id, &kb_id, revision, chunk, &now).await?;
         }
+        refresh_index_summary_in_tx(&mut tx, &kb_id).await?;
         refresh_stats(&mut tx, &kb_id).await?;
         tx.commit().await.map_err(db_err)?;
         self.get_document(&kb_id, id)
@@ -152,6 +159,11 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
             .await
             .map_err(db_err)?;
         let kb = kb.ok_or(RepositoryError::NotFound)?;
+        sqlx::query("DELETE FROM kb_chunks_fts WHERE doc_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         sqlx::query("DELETE FROM kb_chunks WHERE doc_id=?")
             .bind(id)
             .execute(&mut *tx)
@@ -164,6 +176,7 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
             .await
             .map_err(db_err)?;
         refresh_stats(&mut tx, &kb).await?;
+        refresh_index_summary_in_tx(&mut tx, &kb).await?;
         tx.commit().await.map_err(db_err)
     }
     async fn list_ready_chunks(
@@ -283,6 +296,201 @@ impl KnowledgeRepository for SqliteKnowledgeRepository {
     }
 }
 
+#[async_trait::async_trait]
+impl KnowledgeIndexRepository for SqliteKnowledgeRepository {
+    async fn list_chunks_missing_embedding(
+        &self,
+        kb_id: &str,
+        limit: usize,
+    ) -> Result<Vec<KbChunk>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT {CHUNK_COLUMNS} FROM kb_chunks c
+             WHERE c.kb_id=? AND c.embedding IS NULL
+               AND EXISTS(
+                   SELECT 1 FROM kb_documents d
+                   WHERE d.id=c.doc_id AND d.status='ready' AND d.revision=c.document_revision
+               )
+             ORDER BY c.doc_id,c.chunk_index
+             LIMIT ?"
+        ))
+        .bind(kb_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    async fn update_chunk_embeddings(
+        &self,
+        updates: Vec<ChunkEmbeddingUpdate>,
+    ) -> Result<(), RepositoryError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let mut kb_id = None;
+        for update in updates {
+            let row: Option<String> = sqlx::query_scalar(
+                "UPDATE kb_chunks SET embedding=?,embedding_dim=?
+                 WHERE id=?
+                 RETURNING kb_id",
+            )
+            .bind(update.embedding)
+            .bind(update.embedding_dim)
+            .bind(update.chunk_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            kb_id = row.or(kb_id);
+        }
+        if let Some(kb_id) = kb_id {
+            refresh_index_summary_in_tx(&mut tx, &kb_id).await?;
+        }
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn clear_embeddings_for_kb(&self, kb_id: &str) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query(
+            "UPDATE kb_chunks SET embedding=NULL,embedding_dim=0
+             WHERE kb_id=? AND EXISTS(
+                 SELECT 1 FROM kb_documents d
+                 WHERE d.id=kb_chunks.doc_id
+                   AND d.status='ready'
+                   AND d.revision=kb_chunks.document_revision
+             )",
+        )
+        .bind(kb_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        refresh_index_summary_in_tx(&mut tx, kb_id).await?;
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn sync_fts_rows_for_document(
+        &self,
+        kb_id: &str,
+        document_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM kb_chunks_fts WHERE kb_id=? AND doc_id=?")
+            .bind(kb_id)
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let chunks = list_ready_chunks_for_fts_in_tx(&mut tx, kb_id, Some(document_id)).await?;
+        for chunk in &chunks {
+            upsert_chunk_fts_in_tx(&mut tx, chunk).await?;
+        }
+        refresh_index_summary_in_tx(&mut tx, kb_id).await?;
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn rebuild_fts_for_kb(&self, kb_id: &str) -> Result<(), RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query("DELETE FROM kb_chunks_fts WHERE kb_id=?")
+            .bind(kb_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let chunks = list_ready_chunks_for_fts_in_tx(&mut tx, kb_id, None).await?;
+        for chunk in &chunks {
+            upsert_chunk_fts_in_tx(&mut tx, chunk).await?;
+        }
+        refresh_index_summary_in_tx(&mut tx, kb_id).await?;
+        tx.commit().await.map_err(db_err)
+    }
+
+    async fn get_index_meta(&self, kb_id: &str) -> Result<KbIndexMeta, RepositoryError> {
+        if let Some(meta) = sqlx::query_as(&format!(
+            "SELECT {INDEX_META_COLUMNS} FROM kb_index_meta WHERE kb_id=?"
+        ))
+        .bind(kb_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?
+        {
+            return Ok(meta);
+        }
+        self.refresh_index_summary(kb_id).await
+    }
+
+    async fn update_index_meta(&self, input: UpdateIndexMetaInput) -> Result<(), RepositoryError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO kb_index_meta(
+                kb_id,index_type,embedding_dim,chunk_count,embedded_count,fts_status,
+                hnsw_status,index_path,status,error_message,updated_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(kb_id) DO UPDATE SET
+                index_type=excluded.index_type,
+                embedding_dim=excluded.embedding_dim,
+                chunk_count=excluded.chunk_count,
+                embedded_count=excluded.embedded_count,
+                fts_status=excluded.fts_status,
+                hnsw_status=excluded.hnsw_status,
+                index_path=excluded.index_path,
+                status=excluded.status,
+                error_message=excluded.error_message,
+                updated_at=excluded.updated_at",
+        )
+        .bind(&input.kb_id)
+        .bind(input.index_type)
+        .bind(input.embedding_dim)
+        .bind(input.chunk_count)
+        .bind(input.embedded_count)
+        .bind(input.fts_status)
+        .bind(input.hnsw_status)
+        .bind(input.index_path)
+        .bind(input.status.to_string())
+        .bind(input.error_message)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn refresh_index_summary(&self, kb_id: &str) -> Result<KbIndexMeta, RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let meta = refresh_index_summary_in_tx(&mut tx, kb_id).await?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(meta)
+    }
+
+    async fn keyword_search(
+        &self,
+        kb_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<KeywordHit>, RepositoryError> {
+        let query = build_fts_query(query);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as(
+            "SELECT fts.chunk_id, bm25(kb_chunks_fts) AS score
+             FROM kb_chunks_fts fts
+             JOIN kb_documents d
+               ON d.id=fts.doc_id
+              AND d.revision=fts.document_revision
+             WHERE fts.kb_id=?
+               AND d.status='ready'
+               AND kb_chunks_fts MATCH ?
+             ORDER BY score
+             LIMIT ?",
+        )
+        .bind(kb_id)
+        .bind(query)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)
+    }
+}
+
 fn affected(rows: u64) -> Result<(), RepositoryError> {
     if rows == 0 {
         Err(RepositoryError::NotFound)
@@ -298,8 +506,235 @@ async fn insert_chunk(
     chunk: NewKbChunk,
     now: &str,
 ) -> Result<(), RepositoryError> {
-    sqlx::query("INSERT INTO kb_chunks(id,doc_id,kb_id,chunk_index,document_revision,content,token_count,metadata,symbol_name,symbol_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(Uuid::now_v7().to_string()).bind(doc_id).bind(kb_id).bind(chunk.chunk_index).bind(revision).bind(chunk.content).bind(chunk.token_count).bind(chunk.metadata.to_string()).bind(chunk.symbol_name).bind(chunk.symbol_kind).bind(now).execute(&mut **tx).await.map_err(db_err)?;
+    let inserted = InsertedChunkForFts {
+        id: Uuid::now_v7().to_string(),
+        kb_id: kb_id.to_string(),
+        doc_id: doc_id.to_string(),
+        document_revision: revision,
+        content: chunk.content,
+        symbol_name: chunk.symbol_name,
+        symbol_kind: chunk.symbol_kind,
+    };
+    sqlx::query("INSERT INTO kb_chunks(id,doc_id,kb_id,chunk_index,document_revision,content,token_count,metadata,symbol_name,symbol_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(&inserted.id)
+        .bind(doc_id)
+        .bind(kb_id)
+        .bind(chunk.chunk_index)
+        .bind(revision)
+        .bind(&inserted.content)
+        .bind(chunk.token_count)
+        .bind(chunk.metadata.to_string())
+        .bind(&inserted.symbol_name)
+        .bind(&inserted.symbol_kind)
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    upsert_chunk_fts_in_tx(tx, &inserted).await?;
     Ok(())
+}
+
+struct InsertedChunkForFts {
+    id: String,
+    kb_id: String,
+    doc_id: String,
+    document_revision: i64,
+    content: String,
+    symbol_name: Option<String>,
+    symbol_kind: Option<String>,
+}
+
+async fn upsert_chunk_fts_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    chunk: &InsertedChunkForFts,
+) -> Result<(), RepositoryError> {
+    sqlx::query("DELETE FROM kb_chunks_fts WHERE chunk_id=?")
+        .bind(&chunk.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    sqlx::query(
+        "INSERT INTO kb_chunks_fts(
+            chunk_id,kb_id,doc_id,document_revision,content,symbol_name,symbol_kind
+         ) VALUES(?,?,?,?,?,?,?)",
+    )
+    .bind(&chunk.id)
+    .bind(&chunk.kb_id)
+    .bind(&chunk.doc_id)
+    .bind(chunk.document_revision)
+    .bind(&chunk.content)
+    .bind(chunk.symbol_name.as_deref().unwrap_or(""))
+    .bind(chunk.symbol_kind.as_deref().unwrap_or(""))
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+async fn list_ready_chunks_for_fts_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    kb_id: &str,
+    document_id: Option<&str>,
+) -> Result<Vec<InsertedChunkForFts>, RepositoryError> {
+    sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT c.id,c.kb_id,c.doc_id,c.document_revision,c.content,c.symbol_name,c.symbol_kind
+         FROM kb_chunks c
+         JOIN kb_documents d
+           ON d.id=c.doc_id
+          AND d.revision=c.document_revision
+         WHERE c.kb_id=?
+           AND (? IS NULL OR c.doc_id=?)
+           AND d.status='ready'
+         ORDER BY c.doc_id,c.chunk_index",
+    )
+    .bind(kb_id)
+    .bind(document_id)
+    .bind(document_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db_err)
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(id, kb_id, doc_id, document_revision, content, symbol_name, symbol_kind)| {
+                    InsertedChunkForFts {
+                        id,
+                        kb_id,
+                        doc_id,
+                        document_revision,
+                        content,
+                        symbol_name,
+                        symbol_kind,
+                    }
+                },
+            )
+            .collect()
+    })
+}
+
+async fn refresh_index_summary_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    kb_id: &str,
+) -> Result<KbIndexMeta, RepositoryError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM kb_knowledge_bases WHERE id=?")
+        .bind(kb_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?;
+    if exists.is_none() {
+        return Err(RepositoryError::NotFound);
+    }
+    let (chunk_count, embedded_count, embedding_dim): (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+             COUNT(c.id),
+             COUNT(CASE WHEN c.embedding IS NOT NULL THEN 1 END),
+             COALESCE(MAX(CASE WHEN c.embedding IS NOT NULL THEN c.embedding_dim END),0)
+         FROM kb_chunks c
+         JOIN kb_documents d
+           ON d.id=c.doc_id
+          AND d.revision=c.document_revision
+         WHERE c.kb_id=?
+           AND d.status='ready'",
+    )
+    .bind(kb_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let fts_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM kb_chunks_fts fts
+         JOIN kb_documents d
+           ON d.id=fts.doc_id
+          AND d.revision=fts.document_revision
+         WHERE fts.kb_id=?
+           AND d.status='ready'",
+    )
+    .bind(kb_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    let fts_status = if chunk_count == 0 {
+        KbIndexStatus::None
+    } else if fts_count == chunk_count {
+        KbIndexStatus::Ready
+    } else {
+        KbIndexStatus::NeedsFtsRebuild
+    };
+    let status = derive_index_status(&IndexHealth {
+        ready_chunk_count: chunk_count,
+        embedded_count,
+        embedding_running: false,
+        fts_status,
+        hnsw_status: KbIndexStatus::None,
+        hnsw_required: false,
+        last_error: None,
+    });
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO kb_index_meta(
+            kb_id,index_type,embedding_dim,chunk_count,embedded_count,fts_status,
+            hnsw_status,status,error_message,updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,NULL,?)
+         ON CONFLICT(kb_id) DO UPDATE SET
+            embedding_dim=excluded.embedding_dim,
+            chunk_count=excluded.chunk_count,
+            embedded_count=excluded.embedded_count,
+            fts_status=excluded.fts_status,
+            hnsw_status=excluded.hnsw_status,
+            status=excluded.status,
+            error_message=NULL,
+            updated_at=excluded.updated_at",
+    )
+    .bind(kb_id)
+    .bind("linear")
+    .bind(embedding_dim)
+    .bind(chunk_count)
+    .bind(embedded_count)
+    .bind(fts_status.to_string())
+    .bind(KbIndexStatus::None.to_string())
+    .bind(status.to_string())
+    .bind(&now)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query(
+        "UPDATE kb_knowledge_bases SET embedding_dim=?,index_status=?,updated_at=? WHERE id=?",
+    )
+    .bind(embedding_dim)
+    .bind(status.to_string())
+    .bind(&now)
+    .bind(kb_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    sqlx::query_as(&format!(
+        "SELECT {INDEX_META_COLUMNS} FROM kb_index_meta WHERE kb_id=?"
+    ))
+    .bind(kb_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)
+}
+
+fn build_fts_query(query: &str) -> String {
+    query
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .take(16)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 async fn refresh_stats(
     tx: &mut Transaction<'_, Sqlite>,
@@ -480,5 +915,127 @@ mod tests {
             .await
             .expect("second");
         assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn fts_rebuild_indexes_current_ready_chunks() {
+        let repo = repo().await;
+        let kb = kb(&repo).await;
+        let doc = repo
+            .upsert_document_pending(UpsertDocumentInput {
+                kb_id: kb.id.clone(),
+                source_id: None,
+                filename: "search.md".into(),
+                file_path: None,
+                source_type: "upload".into(),
+                source_url: None,
+                source_path: None,
+                content_hash: "1".into(),
+                file_size: 10,
+                file_type: "markdown".into(),
+            })
+            .await
+            .expect("pending");
+        repo.replace_document_ready(
+            &doc.id,
+            ParsedDocument {
+                text: "needle haystack".into(),
+                file_type: "markdown".into(),
+                language: None,
+                title: None,
+                metadata: json!({}),
+            },
+            vec![NewKbChunk {
+                chunk_index: 0,
+                content: "needle haystack".into(),
+                token_count: 2,
+                metadata: json!({}),
+                symbol_name: Some("needle_fn".into()),
+                symbol_kind: Some("function".into()),
+            }],
+        )
+        .await
+        .expect("ready");
+
+        repo.rebuild_fts_for_kb(&kb.id).await.expect("rebuild fts");
+        let hits = repo
+            .keyword_search(&kb.id, "needle", 5)
+            .await
+            .expect("keyword search");
+
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn replacing_document_removes_stale_fts_rows() {
+        let repo = repo().await;
+        let kb = kb(&repo).await;
+        let doc = repo
+            .upsert_document_pending(UpsertDocumentInput {
+                kb_id: kb.id.clone(),
+                source_id: None,
+                filename: "search.md".into(),
+                file_path: None,
+                source_type: "upload".into(),
+                source_url: None,
+                source_path: None,
+                content_hash: "1".into(),
+                file_size: 10,
+                file_type: "markdown".into(),
+            })
+            .await
+            .expect("pending");
+        let parsed = ParsedDocument {
+            text: "oldtoken".into(),
+            file_type: "markdown".into(),
+            language: None,
+            title: None,
+            metadata: json!({}),
+        };
+        repo.replace_document_ready(
+            &doc.id,
+            parsed.clone(),
+            vec![NewKbChunk {
+                chunk_index: 0,
+                content: "oldtoken".into(),
+                token_count: 1,
+                metadata: json!({}),
+                symbol_name: None,
+                symbol_kind: None,
+            }],
+        )
+        .await
+        .expect("first ready");
+        repo.replace_document_ready(
+            &doc.id,
+            ParsedDocument {
+                text: "newtoken".into(),
+                ..parsed
+            },
+            vec![NewKbChunk {
+                chunk_index: 0,
+                content: "newtoken".into(),
+                token_count: 1,
+                metadata: json!({}),
+                symbol_name: None,
+                symbol_kind: None,
+            }],
+        )
+        .await
+        .expect("second ready");
+
+        assert!(
+            repo.keyword_search(&kb.id, "oldtoken", 5)
+                .await
+                .expect("old search")
+                .is_empty()
+        );
+        assert_eq!(
+            repo.keyword_search(&kb.id, "newtoken", 5)
+                .await
+                .expect("new search")
+                .len(),
+            1
+        );
     }
 }

@@ -74,6 +74,27 @@ pub async fn list_knowledge_documents(
     repo.list_documents(&kb_id).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
+pub async fn get_knowledge_base_index_status(
+    repo: State<'_, SqliteKnowledgeRepository>,
+    kb_id: String,
+) -> Result<KbIndexMeta, String> {
+    repo.refresh_index_summary(&kb_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn rebuild_knowledge_fts_index(
+    repo: State<'_, SqliteKnowledgeRepository>,
+    kb_id: String,
+) -> Result<KbIndexMeta, String> {
+    repo.rebuild_fts_for_kb(&kb_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    repo.refresh_index_summary(&kb_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
 pub async fn create_knowledge_source(
     repo: State<'_, SqliteKnowledgeRepository>,
     kb_id: String,
