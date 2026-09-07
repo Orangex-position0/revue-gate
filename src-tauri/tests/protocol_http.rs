@@ -55,6 +55,7 @@ fn app(h: &Harness) -> Router {
     build_router(
         AppState {
             proxy: Arc::new(usecase),
+            knowledge_repo: None,
             channel_repo: Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
         },
         &GatewaySettings::default(),

@@ -7,6 +7,7 @@ pub mod api_key;
 pub mod channel;
 pub mod dispatcher;
 pub mod error;
+pub mod knowledge;
 pub mod provider;
 pub mod quota;
 pub mod request_log;

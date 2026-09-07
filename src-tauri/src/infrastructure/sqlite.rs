@@ -3,6 +3,7 @@
 
 pub mod api_key;
 pub mod channel;
+pub mod knowledge;
 pub mod request_log;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -79,6 +80,20 @@ mod tests {
             names.contains(&"request_logs".to_string()),
             "tables: {names:?}"
         );
+        for table in [
+            "kb_knowledge_bases",
+            "kb_sources",
+            "kb_documents",
+            "kb_chunks",
+            "kb_tasks",
+            "kb_index_meta",
+            "kb_conversations",
+        ] {
+            assert!(
+                names.contains(&table.to_string()),
+                "missing {table}: {names:?}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

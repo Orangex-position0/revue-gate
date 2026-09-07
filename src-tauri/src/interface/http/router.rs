@@ -16,12 +16,12 @@ use super::handlers::{
     AppState, TraceIdSpan, TraceOnResponse, anthropic_messages, chat_completions, models,
     responses, trace_id_middleware,
 };
-use super::service_modules::ServiceRegistry;
+use super::service_modules::production_service_registry;
 use crate::domain::settings::GatewaySettings;
 
 /// Build the data-plane route tree: /health + /v1/chat/completions + /v1/models, with the trace propagation layer attached.
 pub fn build_router(state: AppState, settings: &GatewaySettings) -> Router {
-    let service_registry = ServiceRegistry::new();
+    let service_registry = production_service_registry();
     service_registry
         .validate()
         .expect("service module registry must be valid");
@@ -98,6 +98,7 @@ mod tests {
         );
         AppState {
             proxy: Arc::new(usecase),
+            knowledge_repo: None,
             channel_repo: channels,
         }
     }

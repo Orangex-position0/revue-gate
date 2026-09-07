@@ -4,14 +4,14 @@ use std::sync::{Arc, RwLock};
 
 use crate::domain::settings::GatewaySettings;
 use crate::interface::http::handlers::AppState;
-use crate::interface::http::service_modules::{ServiceModuleStatus, ServiceRegistry};
+use crate::interface::http::service_modules::{ServiceModuleStatus, production_service_registry};
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_service_statuses(
     state: tauri::State<'_, AppState>,
     settings: tauri::State<'_, Arc<RwLock<GatewaySettings>>>,
 ) -> Result<Vec<ServiceModuleStatus>, String> {
-    let registry = ServiceRegistry::new();
+    let registry = production_service_registry();
     registry
         .validate()
         .expect("service module registry must be valid");

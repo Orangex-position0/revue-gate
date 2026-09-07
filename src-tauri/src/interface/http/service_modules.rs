@@ -8,6 +8,54 @@ use serde_json::Value;
 use crate::domain::settings::ServiceModuleSettings;
 use crate::interface::http::handlers::AppState;
 
+pub struct KnowledgeServiceModule;
+
+#[async_trait::async_trait]
+impl ServiceModule for KnowledgeServiceModule {
+    fn id(&self) -> &'static str {
+        "knowledge"
+    }
+    fn name(&self) -> &'static str {
+        "Knowledge Service"
+    }
+    fn description(&self) -> &'static str {
+        "Local knowledge bases, document ingestion, chunking, and retrieval data."
+    }
+    fn path_prefixes(&self) -> &'static [&'static str] {
+        &["/api/kb"]
+    }
+    async fn get_status(&self, state: &AppState, enabled: bool) -> ServiceModuleStatus {
+        use crate::domain::knowledge::KnowledgeRepository;
+        let configured = state.knowledge_repo.is_some();
+        let result = match &state.knowledge_repo {
+            Some(repo) => repo.service_stats().await.ok(),
+            None => None,
+        };
+        let running =
+            enabled && configured && result.as_ref().is_some_and(|stats| stats.failed_tasks == 0);
+        ServiceModuleStatus {
+            id: self.id().into(),
+            name: self.name().into(),
+            description: self.description().into(),
+            path_prefixes: vec!["/api/kb".into()],
+            enabled,
+            running,
+            stats: result
+                .and_then(|v| serde_json::to_value(v).ok())
+                .unwrap_or_else(|| serde_json::json!({})),
+        }
+    }
+    fn routes(&self) -> Router<AppState> {
+        crate::interface::http::knowledge::create_knowledge_router()
+    }
+}
+
+pub fn production_service_registry() -> ServiceRegistry {
+    let mut registry = ServiceRegistry::new();
+    registry.register(Box::new(KnowledgeServiceModule));
+    registry
+}
+
 #[async_trait::async_trait]
 pub trait ServiceModule: Send + Sync {
     fn id(&self) -> &'static str;
@@ -275,6 +323,7 @@ mod tests {
         );
         AppState {
             proxy: Arc::new(usecase),
+            knowledge_repo: None,
             channel_repo: channels,
         }
     }
@@ -284,10 +333,10 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_starts_empty() {
-        let registry = ServiceRegistry::new();
-
-        assert!(registry.modules.is_empty());
+    fn production_registry_registers_knowledge() {
+        let registry = production_service_registry();
+        assert_eq!(registry.modules.len(), 1);
+        assert_eq!(registry.modules[0].id(), "knowledge");
     }
 
     #[tokio::test]

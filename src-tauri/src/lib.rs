@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 use infrastructure::providers::adaptor_for;
 use infrastructure::sqlite::api_key::SqliteApiKeyRepository;
 use infrastructure::sqlite::channel::SqliteChannelRepository;
+use infrastructure::sqlite::knowledge::SqliteKnowledgeRepository;
 use infrastructure::sqlite::request_log::SqliteRequestLogRepository;
 use infrastructure::store::StoreSettingsRepository;
 use interface::commands::api_key::{
@@ -22,6 +23,11 @@ use interface::commands::api_key::{
 use interface::commands::channel::{
     create_channel, delete_channel, fetch_channel_models, list_channels, set_channel_enabled,
     test_channel, update_channel,
+};
+use interface::commands::knowledge::{
+    create_knowledge_base, create_knowledge_source, delete_knowledge_base, get_knowledge_base,
+    list_knowledge_bases, list_knowledge_documents, list_knowledge_sources, update_knowledge_base,
+    upload_knowledge_document,
 };
 use interface::commands::log::{clear_logs, delete_logs_before, get_log_detail, list_logs};
 use interface::commands::server::{
@@ -161,7 +167,16 @@ pub fn run() {
             delete_logs_before,
             clear_logs,
             get_stats,
-            usage_stats
+            usage_stats,
+            list_knowledge_bases,
+            get_knowledge_base,
+            create_knowledge_base,
+            update_knowledge_base,
+            delete_knowledge_base,
+            upload_knowledge_document,
+            list_knowledge_documents,
+            create_knowledge_source,
+            list_knowledge_sources,
         ])
         // Window events: close-to-tray / minimize-to-tray. Events fire only after setup completes,
         // when the shared settings state is registered (try_state as a fallback to avoid a pre-setup panic).
@@ -206,6 +221,7 @@ pub fn run() {
             app.manage(SqliteChannelRepository::new(pool.clone()));
             app.manage(SqliteApiKeyRepository::new(pool.clone()));
             app.manage(SqliteRequestLogRepository::new(pool.clone()));
+            app.manage(SqliteKnowledgeRepository::new(pool.clone()));
 
             // 1c) Settings: Store repository (settings.json) → load → shared settings into state.
             //     A load failure is not fatal: log it and fall back to defaults (startup must not abort on bad config).
@@ -241,6 +257,7 @@ pub fn run() {
             app.manage(AppState {
                 proxy,
                 channel_repo,
+                knowledge_repo: Some(Arc::new(SqliteKnowledgeRepository::new(pool.clone()))),
             });
 
             // 2) Server manager into state (command layer accesses via tauri::State).

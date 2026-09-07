@@ -40,6 +40,9 @@ use crate::usecases::proxy::{ProxyError, ProxyRequest, ProxyRequestUsecase, Prox
 pub struct AppState {
     /// Proxy loop usecase (auth → channel selection → mapping → forwarding → billing → logging).
     pub proxy: Arc<ProxyRequestUsecase>,
+    /// Knowledge management state is optional in isolated gateway tests.
+    pub knowledge_repo:
+        Option<Arc<crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository>>,
     /// Channel repository needed by the model-list usecase (dedup for /v1/models).
     pub channel_repo: Arc<dyn ChannelRepository>,
 }
@@ -518,6 +521,7 @@ mod tests {
         );
         let state = AppState {
             proxy: Arc::new(usecase),
+            knowledge_repo: None,
             channel_repo: Arc::clone(&h.channel_repo) as Arc<dyn ChannelRepository>,
         };
         build_router(state, &settings)
