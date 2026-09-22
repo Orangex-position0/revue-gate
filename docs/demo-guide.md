@@ -26,7 +26,13 @@ Windows 需要：
 - Visual Studio C++ Build Tools
 - WebView2
 
-验证：
+macOS 需要：
+
+- Node.js 与 pnpm
+- Rust stable / Cargo；项目已通过 `src-tauri/rust-toolchain.toml` 固定工具链
+- Xcode Command Line Tools
+
+Windows PowerShell 验证：
 
 ```powershell
 node --version
@@ -36,9 +42,30 @@ cargo --version
 pnpm tauri info
 ```
 
-如果依赖已安装：
+macOS zsh / bash 验证：
+
+```bash
+node --version
+pnpm --version
+rustc --version
+cargo --version
+pnpm tauri info
+```
+
+如果依赖已安装，Windows PowerShell 执行：
 
 ```powershell
+pnpm install
+pnpm build
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+cargo nextest run --manifest-path src-tauri/Cargo.toml
+pnpm tauri dev
+```
+
+macOS zsh / bash 执行：
+
+```bash
 pnpm install
 pnpm build
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -62,7 +89,7 @@ http://127.0.0.1:3000
 - 渠道名称：`demo-deepseek`
 - 类型：`DeepSeek`
 - Base URL：使用页面提示的默认值，或填入实际兼容端点
-- 模型：`deepseek-chat`
+- 模型：`deepseek-flash`
 - 优先级：`0`
 - 权重：`1`
 
@@ -84,10 +111,18 @@ http://127.0.0.1:3000
 4. 点击“保存”，再点击“启动服务”。
 5. 展示状态变为运行中，并说明服务状态由后端事件同步到前端。
 
-在 PowerShell 另开窗口验证：
+在另一个终端窗口验证服务健康状态。
+
+Windows PowerShell：
 
 ```powershell
 curl.exe http://127.0.0.1:3000/health
+```
+
+macOS zsh / bash：
+
+```bash
+curl http://127.0.0.1:3000/health
 ```
 
 预期结果：
@@ -117,19 +152,36 @@ curl.exe http://127.0.0.1:3000/health
 进入“密钥” → “新建密钥”：
 
 1. 名称填写 `interview-demo`。
-2. 配额可以先留空，表示不限额；也可以填写一个小数值用于演示 429。
+2. 配额填写 `100`，用于在后续演示中说明 quota 会阻止超额请求。
 3. 保存后**立即复制完整 key**。完整 key 只在创建结果中显示一次，列表只显示掩码。
 
-将 key 暂存为 PowerShell 变量：
+将 key 暂存为终端变量。
+
+Windows PowerShell：
 
 ```powershell
 $KEY = "sk-revue-替换成刚刚生成的完整密钥"
 ```
 
+macOS zsh / bash：
+
+```bash
+export KEY="sk-revue-替换成刚刚生成的完整密钥"
+```
+
 ### 第五步：验证统一模型入口（1 分钟）
+
+Windows PowerShell：
 
 ```powershell
 curl.exe http://127.0.0.1:3000/v1/models `
+  -H "Authorization: Bearer $KEY"
+```
+
+macOS zsh / bash：
+
+```bash
+curl http://127.0.0.1:3000/v1/models \
   -H "Authorization: Bearer $KEY"
 ```
 
@@ -137,10 +189,12 @@ curl.exe http://127.0.0.1:3000/v1/models `
 
 ### 第六步：发起一次非流式请求（1–2 分钟）
 
+Windows PowerShell：
+
 ```powershell
 $body = @'
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "messages": [
     {"role": "user", "content": "用一句话解释什么是 API Gateway。"}
   ],
@@ -154,6 +208,28 @@ curl.exe http://127.0.0.1:3000/v1/chat/completions `
   -d $body
 ```
 
+macOS zsh / bash：
+
+```bash
+body=$(cat <<'JSON'
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "user", "content": "用一句话解释什么是 API Gateway。"}
+  ],
+  "stream": false
+}
+JSON
+)
+
+curl http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d "$body"
+```
+
+此时可以回到“密钥”或“日志”查看 `interview-demo` 的 quota 消耗。如果本次请求消耗超过 `100`，下一次使用同一个 key 的请求会返回 `429`，说明本地配额治理已经生效。
+
 讲解请求链路：
 
 ```text
@@ -166,12 +242,36 @@ HTTP handler
   → usage 记账 + request log
 ```
 
-### 第七步：演示流式 SSE（1 分钟）
+### 第七步：创建大配额 Key 并演示流式 SSE（1 分钟）
+
+为了避免第四步的 `interview-demo` 因 `100` quota 被耗尽，先进入“密钥” → “新建密钥”：
+
+1. 名称填写 `interview-demo-sse`。
+2. 配额填写 `1000`。
+3. 保存后立即复制完整 key。
+
+将新的 key 暂存为 SSE 专用变量。
+
+Windows PowerShell：
+
+```powershell
+$SSE_KEY = "sk-revue-替换成刚刚生成的第二个完整密钥"
+```
+
+macOS zsh / bash：
+
+```bash
+export SSE_KEY="sk-revue-替换成刚刚生成的第二个完整密钥"
+```
+
+然后发起流式请求。
+
+Windows PowerShell：
 
 ```powershell
 $streamBody = @'
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-flash",
   "messages": [
     {"role": "user", "content": "请分三点说明流式响应的优点。"}
   ],
@@ -180,9 +280,29 @@ $streamBody = @'
 '@
 
 curl.exe -N http://127.0.0.1:3000/v1/chat/completions `
-  -H "Authorization: Bearer $KEY" `
+  -H "Authorization: Bearer $SSE_KEY" `
   -H "Content-Type: application/json" `
   -d $streamBody
+```
+
+macOS zsh / bash：
+
+```bash
+stream_body=$(cat <<'JSON'
+{
+  "model": "deepseek-flash",
+  "messages": [
+    {"role": "user", "content": "请分三点说明流式响应的优点。"}
+  ],
+  "stream": true
+}
+JSON
+)
+
+curl -N http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer $SSE_KEY" \
+  -H "Content-Type: application/json" \
+  -d "$stream_body"
 ```
 
 指出响应会以 SSE chunk 持续返回并以 `[DONE]` 收尾。流式请求会边转发边累计 usage；如果上游在响应已经开始后失败，HTTP status 无法再修改，系统会记录失败并结束流，这是 SSE 的正常错误边界。
@@ -201,8 +321,17 @@ curl.exe -N http://127.0.0.1:3000/v1/chat/completions `
 
 ### 方案 A：错误本地 Key
 
+Windows PowerShell：
+
 ```powershell
 curl.exe http://127.0.0.1:3000/v1/models `
+  -H "Authorization: Bearer sk-revue-invalid"
+```
+
+macOS zsh / bash：
+
+```bash
+curl http://127.0.0.1:3000/v1/models \
   -H "Authorization: Bearer sk-revue-invalid"
 ```
 
