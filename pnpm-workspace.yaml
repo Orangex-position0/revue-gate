@@ -1,3 +1,4 @@
 # pnpm workspace config (since pnpm 11, build settings live here; no longer read from the pnpm field in package.json)
 allowBuilds:
   esbuild: true
+  pi-decimals: false
