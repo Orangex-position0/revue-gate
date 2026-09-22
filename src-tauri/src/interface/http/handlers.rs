@@ -40,11 +40,11 @@ use crate::usecases::proxy::{ProxyError, ProxyRequest, ProxyRequestUsecase, Prox
 pub struct AppState {
     /// Proxy loop usecase (auth → channel selection → mapping → forwarding → billing → logging).
     pub proxy: Arc<ProxyRequestUsecase>,
-    /// Knowledge management state is optional in isolated gateway tests.
-    pub knowledge_repo:
-        Option<Arc<crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository>>,
     /// Channel repository needed by the model-list usecase (dedup for /v1/models).
     pub channel_repo: Arc<dyn ChannelRepository>,
+    /// Optional knowledge repository used by knowledge and MCP service modules.
+    pub knowledge_repo:
+        Option<Arc<crate::infrastructure::sqlite::knowledge::SqliteKnowledgeRepository>>,
 }
 
 /// Trace id propagated through a request: written to request extensions by the middleware, shared by handlers / spans / log persistence.

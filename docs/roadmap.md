@@ -19,16 +19,30 @@
 - 处理策略：只审计 / 警告 / 阻断，阻断默认返回 `403 security_policy_blocked`；默认观察模式不影响请求
 - 规则管理：内置风险规则 + 基础黑白名单（域名 / 工具 / 路径 / 关键词），独立 Rule Registry 暂缓
 - 安全配置面板：独立开关控制 Unicode 检测、工具/命令风险、外联/追踪风险、严重风险强制阻断
+- Service Module 控制面 UI：接入后端 `serviceModules` 设置与 `get_service_statuses`，展示模块启用状态、健康状态、path prefixes 和 stats；模块开关第一版提示需重启 HTTP server 后生效
 - 日志展示：请求列表安全等级 Badge、详情页风险摘要 / 评分 / 处理动作 / 脱敏证据
+- 协议链路可观测性：为 `request_logs` 补充 `downstream_protocol`、`downstream_endpoint`、`upstream_protocol`、`upstream_endpoint`、`codec_version` 等字段，用于区分 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 的入口协议和转换路径
 - 仪表盘完整时间粒度：自定义时间范围、周 / 月对比趋势（对齐 WaLiAPI 全部粒度）
+
+### 待讨论
+
+- [ ] 增加 prompt preview: 先检查一下其他主流 ai 网关（如 Litellm）是否有这个功能？具体来说，收集每次请求的 prompt 内容，让模型一次性针对一部分请求的 prompt 内容（可能是 100 条）进行分析和理解，并提出改进建议，让用户逐渐改变 prompt 习惯，输入高效的 prompt
+
+### cicd
+
+修改 `release.yml`：
+
+- github release 页面没有相关的笔记，没有 release 信息，需要补充
+- releases 页面中的 v0.1.0 还是 draft 状态；而且 assets 有200多个小文件，按理应该只是各个平台的构建产物、可运行程序或压缩包，而不是每个文件都是一个单独的构建产物
 
 ## v0.3.0 — 扩展能力
 
 - 更多对外接口：`/v1/completions`、`/v1/responses`、`/v1/embeddings`、`/v1/images/*`、`/v1/audio/*`、`/v1/messages`（Anthropic 协议）
-- RAG / 知识库（多来源导入、索引、搜索、问答）
+- RAG / 知识库（多来源导入、索引、搜索、问答）：MVP 先支持文本、Markdown、常见代码文本文件和 HTML，混合检索默认使用 RRF，不内置 reranker；后续补充 `.pdf`、`.docx`、`.doc`、`.pptx`、`.xlsx`、`.csv` 等解析能力，并评估可选 reranker
 - MCP 服务（工具网关 / Agent 网关）
 - 导入导出（渠道 JSON 备份）
 - 本地 AI 工具自动配置（Claude Code / Codex / Gemini CLI / Claude Desktop 等）
+- Service Module 动态启停：运行中按最新设置重建 Axum 路由树并重启 HTTP server，处理端口占用、重启失败回滚、前端状态事件与进行中 SSE 请求的语义
 - 密钥授权增强：允许模型 / 渠道白名单、过期时间
 - 日志自动保留策略：配置保留期（如 N 天后自动清理）
 - 安全审计增强：独立 Rule Registry、Evidence Store、Audit Log / audit_events，用于规则版本管理、证据独立保留、误报复核、导出和跨请求统计

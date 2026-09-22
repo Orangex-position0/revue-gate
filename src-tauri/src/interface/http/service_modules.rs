@@ -7,6 +7,8 @@ use serde_json::Value;
 
 use crate::domain::settings::ServiceModuleSettings;
 use crate::interface::http::handlers::AppState;
+use crate::protocol::registry;
+use crate::services::mcp::McpService;
 
 pub struct KnowledgeServiceModule;
 
@@ -53,6 +55,7 @@ impl ServiceModule for KnowledgeServiceModule {
 pub fn production_service_registry() -> ServiceRegistry {
     let mut registry = ServiceRegistry::new();
     registry.register(Box::new(KnowledgeServiceModule));
+    registry.register(Box::new(McpService));
     registry
 }
 
@@ -61,8 +64,11 @@ pub trait ServiceModule: Send + Sync {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
+    /// HTTP path prefixes owned by this module.
     fn path_prefixes(&self) -> &'static [&'static str];
+    /// Get Service Module status.
     async fn get_status(&self, state: &AppState, enabled: bool) -> ServiceModuleStatus;
+    /// Axum routes exposed by this module.
     fn routes(&self) -> Router<AppState>;
 }
 
@@ -82,7 +88,7 @@ pub struct ServiceModuleStatus {
     /// Whether the module is healthy and serviceable.
     pub running: bool,
     /// Module-specific status counters or diagnostics.
-    pub stats: Value,
+    pub stats: serde_json::Value,
 }
 
 pub struct ServiceRegistry {
@@ -335,8 +341,9 @@ mod tests {
     #[test]
     fn production_registry_registers_knowledge() {
         let registry = production_service_registry();
-        assert_eq!(registry.modules.len(), 1);
+        assert_eq!(registry.modules.len(), 2);
         assert_eq!(registry.modules[0].id(), "knowledge");
+        assert_eq!(registry.modules[1].id(), "mcp");
     }
 
     #[tokio::test]
