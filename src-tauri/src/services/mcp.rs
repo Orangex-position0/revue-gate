@@ -5,9 +5,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
+use self::{
+    handlers::tools,
+    model::{McpRequest, McpResponse},
+};
 use crate::{
     infrastructure::mcp::knowledge::{
         McpError, McpReadKnowledgeChunkInput, list_knowledge_bases_tool, read_knowledge_chunk_tool,
@@ -66,7 +70,6 @@ impl ServiceModule for McpService {
         Router::new()
             .route("/mcp", get(mcp_info).post(handle_mcp))
             .route("/mcp/", post(handle_mcp))
-            .route("/mcp/sse", method_router)
     }
 }
 

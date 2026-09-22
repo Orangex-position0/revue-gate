@@ -4,15 +4,15 @@ use serde_json::Value;
 use crate::infrastructure::mcp::knowledge::McpError;
 
 #[derive(Debug, Deserialize)]
-struct McpRequest {
-    id: Option<Value>,
-    method: String,
+pub(crate) struct McpRequest {
+    pub(crate) id: Option<Value>,
+    pub(crate) method: String,
     #[serde(default)]
-    params: Value,
+    pub(crate) params: Value,
 }
 
 #[derive(Debug, Serialize)]
-struct McpResponse {
+pub(crate) struct McpResponse {
     jsonrpc: &'static str,
     id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,7 +22,7 @@ struct McpResponse {
 }
 
 impl McpResponse {
-    fn success(id: Option<Value>, result: Value) -> Self {
+    pub(crate) fn success(id: Option<Value>, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
@@ -31,7 +31,7 @@ impl McpResponse {
         }
     }
 
-    fn error(id: Option<Value>, code: i32, message: impl Into<String>) -> Self {
+    pub(crate) fn error(id: Option<Value>, code: i32, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0",
             id,
@@ -43,7 +43,7 @@ impl McpResponse {
         }
     }
 
-    fn from_error(id: Option<Value>, error: McpError) -> Self {
+    pub(crate) fn from_error(id: Option<Value>, error: McpError) -> Self {
         let code = match error {
             McpError::InvalidParams(_) => -32602,
             McpError::NotFound(_) => -32004,

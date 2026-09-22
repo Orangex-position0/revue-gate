@@ -3,11 +3,9 @@
 use std::collections::HashSet;
 
 use axum::Router;
-use serde_json::Value;
 
 use crate::domain::settings::ServiceModuleSettings;
 use crate::interface::http::handlers::AppState;
-use crate::protocol::registry;
 use crate::services::mcp::McpService;
 
 pub struct KnowledgeServiceModule;

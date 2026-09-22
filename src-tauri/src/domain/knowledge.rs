@@ -19,27 +19,29 @@ macro_rules! text_enum {
     };
 }
 
+macro_rules! text_enum_default {
+    ($name:ident { $default:ident => $default_value:literal $(, $variant:ident => $value:literal)* $(,)? }) => {
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+        #[serde(rename_all = "snake_case")]
+        #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+        pub enum $name { #[default] $default $(, $variant)* }
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(match self { Self::$default => $default_value $(, Self::$variant => $value)* })
+            }
+        }
+    };
+}
+
 text_enum!(KbDocumentStatus { Pending => "pending", Processing => "processing", Ready => "ready", Failed => "failed", Deleted => "deleted" });
 text_enum!(KbSourceStatus { Pending => "pending", Importing => "importing", Ready => "ready", Syncing => "syncing", Failed => "failed", Disabled => "disabled" });
 text_enum!(KbTaskType { ImportSource => "import_source", SyncSource => "sync_source", ProcessDocument => "process_document", ReindexDocument => "reindex_document" });
 text_enum!(KbTaskStatus { Pending => "pending", Running => "running", Succeeded => "succeeded", Failed => "failed" });
 text_enum!(KbIndexStatus { None => "none", NeedsEmbedding => "needs_embedding", Embedding => "embedding", NeedsFtsRebuild => "needs_fts_rebuild", FtsBuilding => "fts_building", NeedsHnswRebuild => "needs_hnsw_rebuild", HnswBuilding => "hnsw_building", Ready => "ready", Failed => "failed" });
 text_enum!(ConversationRole { User => "user", Assistant => "assistant" });
-text_enum!(KnowledgeSearchMode { Hybrid => "hybrid", Vector => "vector", Keyword => "keyword" });
-text_enum!(FusionStrategy { Rrf => "rrf" });
+text_enum_default!(KnowledgeSearchMode { Hybrid => "hybrid", Vector => "vector", Keyword => "keyword" });
+text_enum_default!(FusionStrategy { Rrf => "rrf" });
 text_enum!(RagClientKind { ExternalHttp => "external_http", TauriUi => "tauri_ui", Mcp => "mcp" });
-
-impl Default for KnowledgeSearchMode {
-    fn default() -> Self {
-        Self::Hybrid
-    }
-}
-
-impl Default for FusionStrategy {
-    fn default() -> Self {
-        Self::Rrf
-    }
-}
 
 pub fn default_search_limit() -> usize {
     8

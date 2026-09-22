@@ -176,6 +176,7 @@ where
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_exchange_best_effort(
         &self,
         kb_id: Option<&str>,
