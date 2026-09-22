@@ -1,7 +1,7 @@
 // Channel management page: channel list + CRUD / enable-disable / connectivity test (ticket 04 / 06).
 // Data is local useState + load(), refreshed in place after CRUD (see Architecture-frontend.md "business data does not go into the store").
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Activity, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { ChannelForm } from "./ChannelForm";
 import { CHANNEL_TYPE_LABELS } from "@/lib/constants";
 import { channelApi, invokeErrorMessage } from "@/lib/api";
@@ -22,6 +22,8 @@ export function ChannelsPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   /** id of the channel being tested; non-null disables that row's test button. */
   const [testingId, setTestingId] = useState<string | null>(null);
 
@@ -77,14 +79,16 @@ export function ChannelsPage() {
   }
 
   async function handleDelete(channel: Channel) {
-    if (!window.confirm(`确定删除渠道「${channel.name}」？此操作不可撤销。`)) {
-      return;
-    }
+    setDeletingId(channel.id);
     try {
       await channelApi.remove(channel.id);
+      setDeleteTarget(null);
       setChannels((prev) => prev.filter((c) => c.id !== channel.id));
+      void load();
     } catch (error) {
       window.alert(invokeErrorMessage(error));
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -219,11 +223,16 @@ export function ChannelsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void handleDelete(channel)}
+                        onClick={() => setDeleteTarget(channel)}
                         aria-label={`删除 ${channel.name}`}
-                        className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-danger"
+                        disabled={deletingId === channel.id}
+                        className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-danger disabled:opacity-50"
                       >
-                        <Trash2 className="h-4 w-4" />
+                        {deletingId === channel.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
                       </button>
                     </div>
                   </td>
@@ -239,7 +248,56 @@ export function ChannelsPage() {
           initial={form.channel}
           onCancel={() => setForm(null)}
           onSaved={handleSaved}
-        />      )}
+        />
+      )}
+
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="删除渠道"
+        >
+          <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-base font-semibold">删除渠道</h3>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                aria-label="关闭"
+                disabled={deletingId === deleteTarget.id}
+                className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mb-4 text-sm text-muted-foreground">
+              确定删除渠道「{deleteTarget.name}」？此操作不可撤销。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deletingId === deleteTarget.id}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelete(deleteTarget)}
+                disabled={deletingId === deleteTarget.id}
+                className="flex items-center gap-1 rounded-md bg-danger px-3 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-50"
+              >
+                {deletingId === deleteTarget.id && (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                )}
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

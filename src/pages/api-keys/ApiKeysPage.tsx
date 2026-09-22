@@ -2,7 +2,7 @@
 // Data is local useState + load(), refreshed in place after CRUD (same as ChannelsPage). The plaintext returned on create
 // is shown only once after creation (create returns plaintext; the backend masks it to a placeholder on all other paths); it cannot be seen again after closing.
 import { useCallback, useEffect, useState } from "react";
-import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import { ApiKeyForm } from "./ApiKeyForm";
 import { apiKeyApi, invokeErrorMessage } from "@/lib/api";
 import type { ApiKey } from "@/types";
@@ -23,6 +23,8 @@ export function ApiKeysPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   /** Plaintext of the just-created key (shown once in a modal); null = none. */
   const [createdKey, setCreatedKey] = useState<ApiKey | null>(null);
   const [copied, setCopied] = useState(false);
@@ -75,14 +77,16 @@ export function ApiKeysPage() {
   }
 
   async function handleDelete(key: ApiKey) {
-    if (!window.confirm(`确定删除密钥「${key.name}」？此操作不可撤销。`)) {
-      return;
-    }
+    setDeletingId(key.id);
     try {
       await apiKeyApi.remove(key.id);
+      setDeleteTarget(null);
       setKeys((prev) => prev.filter((k) => k.id !== key.id));
+      void load();
     } catch (error) {
       window.alert(invokeErrorMessage(error));
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -171,11 +175,16 @@ export function ApiKeysPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void handleDelete(key)}
+                        onClick={() => setDeleteTarget(key)}
                         aria-label={`删除 ${key.name}`}
-                        className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-danger"
+                        disabled={deletingId === key.id}
+                        className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-danger disabled:opacity-50"
                       >
-                        <Trash2 className="h-4 w-4" />
+                        {deletingId === key.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
                       </button>
                     </div>
                   </td>
@@ -192,6 +201,54 @@ export function ApiKeysPage() {
           onCancel={() => setForm(null)}
           onSaved={handleSaved}
         />
+      )}
+
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="删除密钥"
+        >
+          <div className="w-full max-w-md rounded-lg border border-border bg-card p-5 shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-base font-semibold">删除密钥</h3>
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                aria-label="关闭"
+                disabled={deletingId === deleteTarget.id}
+                className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mb-4 text-sm text-muted-foreground">
+              确定删除密钥「{deleteTarget.name}」？此操作不可撤销。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deletingId === deleteTarget.id}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelete(deleteTarget)}
+                disabled={deletingId === deleteTarget.id}
+                className="flex items-center gap-1 rounded-md bg-danger px-3 py-1.5 text-sm text-white hover:opacity-90 disabled:opacity-50"
+              >
+                {deletingId === deleteTarget.id && (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                )}
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {createdKey && (
