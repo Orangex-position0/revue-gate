@@ -255,6 +255,14 @@ function LogDetailModal({
   keyNameOf,
 }: LogDetailModalProps) {
   const body = detail.requestBody;
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   const paramsKeys = Object.keys(
     detail.requestParams && typeof detail.requestParams === "object"
       ? (detail.requestParams as Record<string, unknown>)
@@ -275,12 +283,12 @@ function LogDetailModal({
       }）`;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-label="日志详情"
     >
-      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-lg">
+      <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-2xl sm:p-6">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-base font-semibold">日志详情</h3>
           <button
@@ -448,6 +456,7 @@ export function LogsPage() {
   // Detail modal.
   const [detail, setDetail] = useState<LogDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -518,12 +527,12 @@ export function LogsPage() {
     }
     try {
       const n = await logApi.deleteBefore(before);
-      window.alert(`已删除 ${n} 条日志`);
+      setActionMessage(`已删除 ${n} 条日志`);
       setDeleteBeforeDate("");
       setPage(1);
       setRefresh((r) => r + 1);
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     }
   }
 
@@ -536,11 +545,11 @@ export function LogsPage() {
     }
     try {
       const n = await logApi.clear();
-      window.alert(`已删除 ${n} 条日志`);
+      setActionMessage(`已删除 ${n} 条日志`);
       setPage(1);
       setRefresh((r) => r + 1);
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     }
   }
 
@@ -550,7 +559,7 @@ export function LogsPage() {
     try {
       setDetail(await logApi.detail(id));
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     } finally {
       setDetailLoading(false);
     }
@@ -570,15 +579,15 @@ export function LogsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">日志</h2>
-        <span className="text-sm text-muted-foreground">共 {total} 条记录</span>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><h2 className="text-xl font-semibold tracking-tight">日志</h2><p className="mt-1 text-sm text-muted-foreground">查看请求链路、耗时和安全审计结果。</p></div>
+        <span className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">共 {total} 条记录</span>
       </div>
 
       {/* Filter + delete toolbar */}
       <form
         onSubmit={handleSearch}
-        className="space-y-3 rounded-lg border border-border bg-card p-3"
+        className="space-y-3 rounded-2xl border border-border bg-card p-4 shadow-sm"
       >
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
           <div>
@@ -715,12 +724,13 @@ export function LogsPage() {
       </form>
 
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
-          加载失败：{loadError}
-        </p>
+        <div className="flex items-center justify-between rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert"><span>加载失败：{loadError}</span><button type="button" onClick={() => void load()} className="font-medium underline">重试</button></div>
+      )}
+      {actionMessage && (
+        <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-accent px-3 py-2 text-sm text-accent-foreground" role="status"><span>{actionMessage}</span><button type="button" onClick={() => setActionMessage(null)} aria-label="关闭提示"><X className="h-4 w-4" /></button></div>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <div className="overflow-x-auto rounded-2xl border border-border bg-card shadow-sm">
         <table className="w-full">
           <thead className="bg-muted text-left text-xs uppercase text-muted-foreground">
             <tr>

@@ -5,12 +5,14 @@ import { TopBar } from "./TopBar";
 
 export function AppLayout() {
   return (
-    <div className="flex h-screen bg-background text-foreground">
+    <div className="app-shell flex h-screen overflow-hidden bg-background text-foreground">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
-        <main className="flex-1 overflow-y-auto p-6">
-          <Outlet />
+        <main className="app-content flex-1 overflow-y-auto">
+          <div className="page-container">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

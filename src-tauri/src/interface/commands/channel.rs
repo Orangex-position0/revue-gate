@@ -108,6 +108,27 @@ pub async fn test_channel(
 /// Fetch provider-reported models for the current channel form. In edit mode, `id` lets the use case reuse the
 /// stored upstream key when the form leaves apiKey blank.
 #[tauri::command]
+pub async fn reorder_channels(
+    repo: State<'_, SqliteChannelRepository>,
+    ordered_ids: Vec<String>,
+) -> Result<(), String> {
+    let channels = repo.list().await.map_err(|e| e.to_string())?;
+    for (priority, id) in ordered_ids.iter().enumerate() {
+        let parsed = Uuid::parse_str(id).map_err(|e| e.to_string())?;
+        if let Some(mut channel) = channels
+            .iter()
+            .find(|channel| channel.id == parsed)
+            .cloned()
+        {
+            channel.priority = priority as i32;
+            repo.save(&channel).await.map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Fetch provider-reported models for the current channel form.
+#[tauri::command]
 pub async fn fetch_channel_models(
     repo: State<'_, SqliteChannelRepository>,
     id: Option<String>,

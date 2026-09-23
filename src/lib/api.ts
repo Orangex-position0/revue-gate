@@ -14,6 +14,9 @@ import type {
   ServiceModuleStatus,
   StatsSnapshot,
   UsageStats,
+  KnowledgeBase,
+  KnowledgeDocument,
+  KnowledgeSearchResponse,
 } from "@/types";
 
 /** Unified error conversion: Tauri Commands return Result<T, String>; invoke rejection values may be String / Error. */
@@ -63,6 +66,7 @@ export const channelApi = {
   /** Manually fetch provider-reported models for the current form; failures do not mutate the saved channel. */
   fetchModels: (id: string | null, input: ChannelInput) =>
     invoke<string[]>("fetch_channel_models", { id, input }),
+  reorder: (orderedIds: string[]) => invoke<void>("reorder_channels", { orderedIds }),
 };
 
 export const apiKeyApi = {
@@ -91,6 +95,17 @@ export const logApi = {
     invoke<number>("delete_logs_before", { before }),
   /** Clear all request logs; returns the number deleted. */
   clear: () => invoke<number>("clear_logs"),
+};
+
+export const knowledgeApi = {
+  list: () => invoke<KnowledgeBase[]>("list_knowledge_bases"),
+  create: (input: { name: string; description?: string | null; embeddingModel?: string | null; embeddingChannelId?: string | null; embeddingBatchSize?: number | null }) =>
+    invoke<KnowledgeBase>("create_knowledge_base", { input }),
+  update: (id: string, input: Record<string, unknown>) => invoke<KnowledgeBase>("update_knowledge_base", { id, input }),
+  remove: (id: string) => invoke<void>("delete_knowledge_base", { id }),
+  documents: (kbId: string) => invoke<KnowledgeDocument[]>("list_knowledge_documents", { kbId }),
+  rebuildFts: (kbId: string) => invoke<unknown>("rebuild_knowledge_fts_index", { kbId }),
+  search: (input: Record<string, unknown>) => invoke<KnowledgeSearchResponse>("search_knowledge", { input }),
 };
 
 export const statsApi = {

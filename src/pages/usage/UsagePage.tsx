@@ -112,7 +112,7 @@ function RankTable({
   const sorted = useMemo(() => sortedRows(rows, sortKey), [rows, sortKey]);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    <div className="overflow-x-auto rounded-2xl border border-border bg-card shadow-sm">
       <table className="w-full border-collapse">
         <thead className="bg-muted/60">
           <tr>
@@ -174,6 +174,14 @@ export function UsagePage() {
   const [rankTab, setRankTab] = useState<RankTab>("channel");
   const [sortKey, setSortKey] = useState<SortKey>("tokens");
 
+  function applyPreset(days: number) {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - days + 1);
+    setStartDate(formatDateInput(start));
+    setEndDate(formatDateInput(end));
+  }
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -212,6 +220,12 @@ export function UsagePage() {
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+            {[{ label: "今天", days: 1 }, { label: "7 天", days: 7 }, { label: "30 天", days: 30 }].map((preset) => {
+              const active = startDate === formatDateInput(new Date(new Date().setDate(new Date().getDate() - preset.days + 1)));
+              return <button key={preset.days} type="button" onClick={() => applyPreset(preset.days)} className={`rounded-md px-2 py-1 text-xs ${active ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted"}`}>{preset.label}</button>;
+            })}
+          </div>
           <label className="grid gap-1">
             <span className={labelCls}>开始</span>
             <input
@@ -244,13 +258,14 @@ export function UsagePage() {
       </div>
 
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
-          加载失败：{loadError}
-        </p>
+        <div className="flex items-center justify-between rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
+          <span>加载失败：{loadError}</span>
+          <button type="button" onClick={() => void load()} className="font-medium underline">重试</button>
+        </div>
       )}
 
       <div className="grid gap-3 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className={labelCls}>每日请求数</span>
             <span className="text-xs text-muted-foreground">按本地日期</span>
@@ -262,7 +277,7 @@ export function UsagePage() {
             label="每日请求数"
           />
         </div>
-        <div className="rounded-lg border border-border bg-card p-4">
+        <div className="rounded-2xl border border-border bg-card p-5 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className={labelCls}>每日 Token</span>
             <span className="text-xs text-muted-foreground">按本地日期</span>
@@ -276,7 +291,7 @@ export function UsagePage() {
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex w-fit items-center gap-1 rounded-xl border border-border bg-card p-1">
         <button
           type="button"
           onClick={() => setRankTab("channel")}

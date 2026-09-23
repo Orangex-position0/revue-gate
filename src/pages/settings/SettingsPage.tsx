@@ -150,8 +150,8 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">设置</h2>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><h2 className="text-xl font-semibold tracking-tight">设置</h2><p className="mt-1 text-sm text-muted-foreground">管理服务运行方式、外观和安全策略。</p></div>
         {savedAt && (
           <span className="text-sm text-muted-foreground">
             已保存 {savedAt}
@@ -161,9 +161,10 @@ export function SettingsPage() {
 
       {loading && <p className="text-sm text-muted-foreground">加载中…</p>}
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
-          加载失败：{loadError}
-        </p>
+        <div className="flex items-center justify-between rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
+          <span>加载失败：{loadError}</span>
+          <button type="button" onClick={() => void load()} className="font-medium underline">重试</button>
+        </div>
       )}
       {!loading && !loadError && settings && (
         <>
@@ -436,7 +437,7 @@ export function SettingsPage() {
               保存失败：{saveError}
             </p>
           )}
-          <div className="flex justify-end">
+          <div className="sticky bottom-3 z-10 flex justify-end rounded-xl border border-border bg-card/90 p-2 shadow-lg backdrop-blur-sm">
             <button
               type="button"
               onClick={handleSave}

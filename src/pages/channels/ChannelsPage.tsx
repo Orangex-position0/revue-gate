@@ -26,6 +26,8 @@ export function ChannelsPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   /** id of the channel being tested; non-null disables that row's test button. */
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -57,7 +59,7 @@ export function ChannelsPage() {
         prev.map((c) => (c.id === updated.id ? updated : c)),
       );
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     }
   }
 
@@ -69,13 +71,28 @@ export function ChannelsPage() {
       const message = result.ok
         ? `测试成功：${result.latencyMs}ms`
         : `测试失败：${result.error ?? "未知原因"}`;
-      window.alert(message);
+      setActionMessage(message);
       void load();
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     } finally {
       setTestingId(null);
     }
+  }
+
+  async function handleDrop(targetId: string) {
+    if (!draggedId || draggedId === targetId) return;
+    const from = channels.findIndex((channel) => channel.id === draggedId);
+    const to = channels.findIndex((channel) => channel.id === targetId);
+    if (from < 0 || to < 0) return;
+    const next = [...channels];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
+    setChannels(next);
+    setDraggedId(null);
+    try { await channelApi.reorder(next.map((channel) => channel.id)); await load(); }
+    catch (error) { setActionMessage(invokeErrorMessage(error)); void load(); }
   }
 
   async function handleDelete(channel: Channel) {
@@ -86,7 +103,7 @@ export function ChannelsPage() {
       setChannels((prev) => prev.filter((c) => c.id !== channel.id));
       void load();
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     } finally {
       setDeletingId(null);
     }
@@ -107,9 +124,15 @@ export function ChannelsPage() {
       </div>
 
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
+        <p className="rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
           加载失败：{loadError}
         </p>
+      )}
+      {actionMessage && (
+        <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-accent px-3 py-2 text-sm text-accent-foreground" role="status">
+          <span>{actionMessage}</span>
+          <button type="button" onClick={() => setActionMessage(null)} className="rounded-md p-1 text-muted-foreground hover:bg-background" aria-label="关闭提示"><X className="h-4 w-4" /></button>
+        </div>
       )}
 
       <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -142,7 +165,14 @@ export function ChannelsPage() {
               </tr>
             ) : (
               channels.map((channel) => (
-                <tr key={channel.id} className="hover:bg-muted/50">
+                <tr
+                  key={channel.id}
+                  draggable
+                  onDragStart={() => setDraggedId(channel.id)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => void handleDrop(channel.id)}
+                  className={`hover:bg-muted/50 ${draggedId === channel.id ? "opacity-50" : ""}`}
+                >
                   <td className={`${cellCls} font-medium`}>{channel.name}</td>
                   <td className={cellCls}>
                     <span className="rounded bg-accent px-1.5 py-0.5 text-xs text-accent-foreground">

@@ -18,6 +18,10 @@ function quotaLabel(key: ApiKey): string {
   return limit == null ? `${used} / 无上限` : `${used} / ${limit}`;
 }
 
+function quotaPercent(key: ApiKey): number {
+  return key.quota.limit == null ? 0 : Math.min(100, (key.quota.used / Math.max(1, key.quota.limit)) * 100);
+}
+
 export function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
@@ -28,6 +32,7 @@ export function ApiKeysPage() {
   /** Plaintext of the just-created key (shown once in a modal); null = none. */
   const [createdKey, setCreatedKey] = useState<ApiKey | null>(null);
   const [copied, setCopied] = useState(false);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -62,7 +67,7 @@ export function ApiKeysPage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     }
   }
 
@@ -72,7 +77,7 @@ export function ApiKeysPage() {
       const updated = await apiKeyApi.setEnabled(key.id, !key.enabled);
       setKeys((prev) => prev.map((k) => (k.id === updated.id ? updated : k)));
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     }
   }
 
@@ -84,7 +89,7 @@ export function ApiKeysPage() {
       setKeys((prev) => prev.filter((k) => k.id !== key.id));
       void load();
     } catch (error) {
-      window.alert(invokeErrorMessage(error));
+      setActionMessage(invokeErrorMessage(error));
     } finally {
       setDeletingId(null);
     }
@@ -105,9 +110,15 @@ export function ApiKeysPage() {
       </div>
 
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
+        <p className="rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
           加载失败：{loadError}
         </p>
+      )}
+      {actionMessage && (
+        <div className="flex items-center justify-between rounded-xl border border-primary/20 bg-accent px-3 py-2 text-sm text-accent-foreground" role="status">
+          <span>{actionMessage}</span>
+          <button type="button" onClick={() => setActionMessage(null)} className="rounded-md p-1 text-muted-foreground hover:bg-background" aria-label="关闭提示"><X className="h-4 w-4" /></button>
+        </div>
       )}
 
       <div className="overflow-hidden rounded-lg border border-border bg-card">
@@ -142,7 +153,10 @@ export function ApiKeysPage() {
                   <td className={`${cellCls} font-mono text-muted-foreground`}>
                     {key.key}
                   </td>
-                  <td className={cellCls}>{quotaLabel(key)}</td>
+                  <td className={cellCls}>
+                    <div>{quotaLabel(key)}</div>
+                    {key.quota.limit != null && <div className="mt-1 h-1.5 w-32 overflow-hidden rounded-full bg-muted"><div className={`h-full rounded-full ${quotaPercent(key) >= 90 ? "bg-danger" : "bg-primary"}`} style={{ width: `${quotaPercent(key)}%` }} /></div>}
+                  </td>
                   <td className={cellCls}>
                     <button
                       type="button"

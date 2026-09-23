@@ -1,6 +1,6 @@
 // Primary navigation definition: shared by Sidebar (renders nav items) and TopBar (resolves the current page title).
 import type { LucideIcon } from "lucide-react";
-import { BarChart3, KeyRound, LayoutDashboard, Network, ScrollText, Settings } from "lucide-react";
+import { BarChart3, BookOpen, KeyRound, LayoutDashboard, Network, ScrollText, Settings } from "lucide-react";
 
 export interface NavItem {
   path: string;
@@ -14,5 +14,6 @@ export const NAV_ITEMS: NavItem[] = [
   { path: "/channels", label: "渠道", Icon: Network },
   { path: "/api-keys", label: "密钥", Icon: KeyRound },
   { path: "/logs", label: "日志", Icon: ScrollText },
+  { path: "/knowledge", label: "知识库", Icon: BookOpen },
   { path: "/settings", label: "设置", Icon: Settings },
 ];

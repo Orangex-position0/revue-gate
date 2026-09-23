@@ -5,6 +5,7 @@ import { ApiKeysPage } from "@/pages/api-keys/ApiKeysPage";
 import { ChannelsPage } from "@/pages/channels/ChannelsPage";
 import { DashboardPage } from "@/pages/dashboard/DashboardPage";
 import { LogsPage } from "@/pages/logs/LogsPage";
+import { KnowledgeBasePage } from "@/pages/knowledge/KnowledgeBasePage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { UsagePage } from "@/pages/usage/UsagePage";
 
@@ -19,6 +20,7 @@ export function App() {
           <Route path="/channels" element={<ChannelsPage />} />
           <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/logs" element={<LogsPage />} />
+          <Route path="/knowledge" element={<KnowledgeBasePage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>

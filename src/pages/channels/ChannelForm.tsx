@@ -1,7 +1,7 @@
 // Channel form modal: one form shared by create / edit (initial null = create, otherwise = edit).
 // apiKey is not pre-filled on edit; empty = keep the original key (backend update semantics, see usecases/channel.rs).
 // The model list is entered as comma-separated text; model mappings use a row editor with add/remove. On submit, calls back onSaved(channel).
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Loader2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { CHANNEL_TYPE_LABELS, DEFAULT_CHANNEL_MODELS } from "@/lib/constants";
 import { channelApi, invokeErrorMessage } from "@/lib/api";
@@ -49,6 +49,14 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [modelFetchError, setModelFetchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) onCancel();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel, saving]);
 
   function buildInput(): ChannelInput {
     return {
@@ -124,16 +132,16 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
       aria-label={initial ? "编辑渠道" : "新建渠道"}
     >
       <form
         onSubmit={handleSubmit}
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-lg border border-border bg-card p-5 shadow-lg"
+        className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-2xl sm:p-6"
       >
-        <div className="mb-4 flex items-center justify-between">
+        <div className="sticky top-0 z-10 -mx-5 -mt-5 mb-5 flex items-center justify-between border-b border-border bg-card/95 px-5 py-4 backdrop-blur-sm sm:-mx-6 sm:-mt-6 sm:px-6">
           <h3 className="text-base font-semibold">
             {initial ? "编辑渠道" : "新建渠道"}
           </h3>
@@ -338,7 +346,7 @@ export function ChannelForm({ initial, onCancel, onSaved }: ChannelFormProps) {
           )}
         </div>
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="sticky bottom-0 -mx-5 -mb-5 mt-6 flex justify-end gap-2 border-t border-border bg-card/95 px-5 py-4 backdrop-blur-sm sm:-mx-6 sm:-mb-6 sm:px-6">
           <button
             type="button"
             onClick={onCancel}

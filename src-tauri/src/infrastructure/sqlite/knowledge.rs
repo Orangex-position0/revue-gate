@@ -632,7 +632,7 @@ async fn upsert_chunk_fts_in_tx(
     .bind(&chunk.kb_id)
     .bind(&chunk.doc_id)
     .bind(chunk.document_revision)
-    .bind(&chunk.content)
+    .bind(cjk_bigram_text(&chunk.content))
     .bind(chunk.symbol_name.as_deref().unwrap_or(""))
     .bind(chunk.symbol_kind.as_deref().unwrap_or(""))
     .execute(&mut **tx)
@@ -798,13 +798,51 @@ async fn refresh_index_summary_in_tx(
 }
 
 fn build_fts_query(query: &str) -> String {
-    query
+    let mut tokens = Vec::new();
+    for token in query
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .take(16)
-        .collect::<Vec<_>>()
-        .join(" ")
+    {
+        let chars: Vec<char> = token.chars().collect();
+        if chars.iter().all(|ch| is_cjk(*ch)) && chars.len() > 1 {
+            tokens.extend(chars.windows(2).map(|pair| pair.iter().collect::<String>()));
+        } else {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens.into_iter().take(32).collect::<Vec<_>>().join(" OR ")
+}
+
+/// Expand contiguous CJK text into searchable bigrams while preserving latin text.
+fn cjk_bigram_text(text: &str) -> String {
+    let mut output = String::new();
+    let mut run = Vec::new();
+    let flush = |output: &mut String, run: &mut Vec<char>| {
+        if run.len() > 1 {
+            for pair in run.windows(2) {
+                output.extend(pair);
+                output.push(' ');
+            }
+        } else {
+            output.extend(run.iter());
+        }
+        run.clear();
+    };
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            run.push(ch);
+        } else {
+            flush(&mut output, &mut run);
+            output.push(ch);
+        }
+    }
+    flush(&mut output, &mut run);
+    output
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF)
 }
 async fn refresh_stats(
     tx: &mut Transaction<'_, Sqlite>,

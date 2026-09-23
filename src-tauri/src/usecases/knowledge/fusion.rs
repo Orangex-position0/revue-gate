@@ -65,6 +65,17 @@ pub fn rrf_fuse(
     limit: usize,
     rrf_k: f32,
 ) -> Vec<FusedHit> {
+    rrf_fuse_weighted(vector, keyword, limit, rrf_k, 1.0, 1.0)
+}
+
+pub fn rrf_fuse_weighted(
+    vector: Vec<RankedVectorHit>,
+    keyword: Vec<RankedKeywordHit>,
+    limit: usize,
+    rrf_k: f32,
+    vector_weight: f32,
+    keyword_weight: f32,
+) -> Vec<FusedHit> {
     let mut by_chunk: HashMap<String, FusedHit> = HashMap::new();
     for hit in vector {
         let entry = by_chunk.entry(hit.chunk_id.clone()).or_insert(FusedHit {
@@ -75,7 +86,7 @@ pub fn rrf_fuse(
             vector_rank: None,
             keyword_rank: None,
         });
-        entry.score += 1.0 / (rrf_k + hit.rank as f32);
+        entry.score += vector_weight.max(0.0) / (rrf_k.max(0.0) + hit.rank as f32);
         entry.vector_score = Some(hit.score);
         entry.vector_rank = Some(hit.rank);
     }
@@ -88,7 +99,7 @@ pub fn rrf_fuse(
             vector_rank: None,
             keyword_rank: None,
         });
-        entry.score += 1.0 / (rrf_k + hit.rank as f32);
+        entry.score += keyword_weight.max(0.0) / (rrf_k.max(0.0) + hit.rank as f32);
         entry.keyword_score = Some(hit.score);
         entry.keyword_rank = Some(hit.rank);
     }

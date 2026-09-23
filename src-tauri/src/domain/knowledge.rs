@@ -84,6 +84,19 @@ pub struct FusionConfig {
     pub strategy: FusionStrategy,
     #[serde(default = "default_rrf_k")]
     pub rrf_k: f32,
+    /// Relative contribution of vector and keyword rankings in hybrid mode.
+    #[serde(default = "default_vector_weight")]
+    pub vector_weight: f32,
+    #[serde(default = "default_keyword_weight")]
+    pub keyword_weight: f32,
+}
+
+fn default_vector_weight() -> f32 {
+    0.7
+}
+
+fn default_keyword_weight() -> f32 {
+    0.3
 }
 
 fn default_rrf_k() -> f32 {
@@ -95,6 +108,8 @@ impl Default for FusionConfig {
         Self {
             strategy: FusionStrategy::Rrf,
             rrf_k: default_rrf_k(),
+            vector_weight: default_vector_weight(),
+            keyword_weight: default_keyword_weight(),
         }
     }
 }

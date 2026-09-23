@@ -8,7 +8,7 @@ use crate::domain::knowledge::{
 
 use super::QueryEmbedding;
 use super::citation::hydrate_search_results;
-use super::fusion::{rank_keyword_hits, rank_vector_hits, rrf_fuse};
+use super::fusion::{rank_keyword_hits, rank_vector_hits, rrf_fuse_weighted};
 
 const MAX_SEARCH_LIMIT: usize = 50;
 
@@ -86,11 +86,13 @@ where
                         .index_reader
                         .keyword_search(&kb.id, &query, input.limit)
                         .await?;
-                    rrf_fuse(
+                    rrf_fuse_weighted(
                         rank_vector_hits(vector),
                         rank_keyword_hits(keyword),
                         input.limit,
                         input.fusion.rrf_k,
+                        input.fusion.vector_weight,
+                        input.fusion.keyword_weight,
                     )
                 }
                 KnowledgeSearchMode::Vector => {

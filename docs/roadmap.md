@@ -28,6 +28,10 @@
 
 - [ ] 增加 prompt preview: 先检查一下其他主流 ai 网关（如 Litellm）是否有这个功能？具体来说，收集每次请求的 prompt 内容，让模型一次性针对一部分请求的 prompt 内容（可能是 100 条）进行分析和理解，并提出改进建议，让用户逐渐改变 prompt 习惯，输入高效的 prompt
 
+- [ ] 重构整个架构，先参考 E:\test\References\waliapi 项目的架构，但禁止与其完全一致。想法如下：
+    - 还是采用 Clean Architecture 的思路，重点是依赖倒置
+    - 是否要去掉 domain？对于这样一个组件项目
+
 ### cicd
 
 修改 `release.yml`：

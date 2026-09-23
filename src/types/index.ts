@@ -221,6 +221,49 @@ export interface UsageStats {
   byModel: RankRow[];
 }
 
+export interface KnowledgeBase {
+  id: string;
+  name: string;
+  description: string | null;
+  status: number;
+  docCount: number;
+  chunkCount: number;
+  totalTokens: number;
+  embeddingModel: string | null;
+  mcpEnabled: number;
+  indexStatus: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface KnowledgeDocument {
+  id: string;
+  kbId: string;
+  filename: string;
+  status: string;
+  chunkCount: number;
+  tokenCount: number;
+  errorMessage: string | null;
+}
+
+export interface KnowledgeSearchResult {
+  kbId: string;
+  chunkId: string;
+  score: number;
+  vectorScore: number | null;
+  keywordScore: number | null;
+  snippet: string;
+  citation: Record<string, unknown>;
+}
+
+export interface KnowledgeSearchResponse {
+  query: string;
+  requestedMode: "hybrid" | "vector" | "keyword";
+  actualMode: "hybrid" | "vector" | "keyword";
+  results: KnowledgeSearchResult[];
+  warnings: { code: string; message: string; kbId: string | null }[];
+}
+
 /** UI theme tri-state: serialized lowercase, consistent with the backend Theme enum. */
 export type Theme = "light" | "dark" | "system";
 

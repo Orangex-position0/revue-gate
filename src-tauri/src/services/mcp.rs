@@ -1,12 +1,20 @@
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::State,
-    response::{IntoResponse, Response},
+    extract::{Query, State},
+    response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
+use futures_util::stream;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::{Arc, OnceLock},
+};
+use tokio::sync::{Mutex, mpsc};
 
 use self::{
     handlers::tools,
@@ -68,21 +76,64 @@ impl ServiceModule for McpService {
 
     fn routes(&self) -> Router<AppState> {
         Router::new()
-            .route("/mcp", get(mcp_info).post(handle_mcp))
+            .route("/mcp", get(handle_sse).post(handle_mcp))
             .route("/mcp/", post(handle_mcp))
+            .route("/mcp/sse", get(handle_sse).post(handle_mcp))
     }
 }
 
-async fn mcp_info() -> Json<Value> {
-    Json(json!({
-        "name": "revue-gate MCP Server",
-        "transport": "streamable_http",
-        "endpoint": "/mcp",
-    }))
+type SessionMap = Arc<Mutex<HashMap<String, mpsc::Sender<String>>>>;
+static SSE_SESSIONS: OnceLock<SessionMap> = OnceLock::new();
+
+fn sessions() -> &'static SessionMap {
+    SSE_SESSIONS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-async fn handle_mcp(State(state): State<AppState>, Json(request): Json<McpRequest>) -> Response {
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    session_id: Option<String>,
+}
+
+async fn handle_mcp(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+    Json(request): Json<McpRequest>,
+) -> Response {
+    if let Some(session_id) = query.session_id {
+        let response = dispatch(&state, request).await;
+        let payload = serde_json::to_string(&response).unwrap_or_else(|_| "{}".into());
+        let sender = sessions().lock().await.get(&session_id).cloned();
+        if let Some(sender) = sender {
+            let _ = sender.send(payload).await;
+            return axum::http::StatusCode::ACCEPTED.into_response();
+        }
+        return (axum::http::StatusCode::NOT_FOUND, "unknown MCP SSE session").into_response();
+    }
     Json(dispatch(&state, request).await).into_response()
+}
+
+async fn handle_sse() -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let (sender, receiver) = mpsc::channel::<String>(16);
+    sessions().lock().await.insert(session_id.clone(), sender);
+    let endpoint = Event::default()
+        .event("endpoint")
+        .data(format!("/mcp?session_id={session_id}"));
+    let events = stream::unfold(
+        (Some(endpoint), receiver),
+        |(first, mut receiver)| async move {
+            if let Some(event) = first {
+                return Some((Ok(event), (None, receiver)));
+            }
+            receiver.recv().await.map(|payload| {
+                (
+                    Ok(Event::default().event("message").data(payload)),
+                    (None, receiver),
+                )
+            })
+        },
+    );
+    Sse::new(events)
 }
 
 async fn dispatch(state: &AppState, request: McpRequest) -> McpResponse {
@@ -96,7 +147,7 @@ async fn dispatch(state: &AppState, request: McpRequest) -> McpResponse {
                     "name": "revue-gate",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use the knowledge tools to inspect MCP-enabled local knowledge bases.",
+                "instructions": "Use list_knowledge_bases once, then prefer ask_knowledge_base for grounded answers and search_knowledge_base when raw chunks are required. MCP access is restricted to MCP-enabled local knowledge bases.",
             }),
         ),
         "notifications/initialized" | "ping" => McpResponse::success(request.id, json!({})),
