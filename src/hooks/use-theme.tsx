@@ -6,6 +6,7 @@ import { applyTheme, getStoredTheme, setStoredTheme, type Theme } from "@/lib/th
 interface ThemeContextValue {
   theme: Theme;
   changeTheme: (theme: Theme) => void;
+  themeError: string | null;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -13,6 +14,9 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(getStoredTheme);
   const userChanged = useRef(false);
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
+  const writeVersion = useRef(0);
+  const [themeError, setThemeError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,12 +38,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     userChanged.current = true;
     setStoredTheme(next);
     setTheme(next);
-    void settingsApi.get()
-      .then((settings) => settingsApi.save({ ...settings, theme: next }))
-      .catch(() => {});
+    setThemeError(null);
+    const version = ++writeVersion.current;
+    // Preserve click order while the backend serializes updates from other settings pages.
+    writes.current = writes.current.catch(() => {}).then(() =>
+      settingsApi.saveSection({ section: "appearance", value: next }),
+    ).catch((error: unknown) => {
+      if (writeVersion.current === version) {
+        setThemeError(error instanceof Error ? error.message : String(error));
+      }
+    });
   }
 
-  return <ThemeContext.Provider value={{ theme, changeTheme }}>{children}</ThemeContext.Provider>;
+  return <ThemeContext.Provider value={{ theme, changeTheme, themeError }}>{children}</ThemeContext.Provider>;
 }
 
 export function useTheme(): ThemeContextValue {

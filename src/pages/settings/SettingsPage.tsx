@@ -1,472 +1,188 @@
-// Settings center page: server start/stop + host/port / theme / tray and autostart / failure retry policy.
-// Data is local useState + load() (business data does not go into the store, see Architecture-frontend.md).
-// The start/stop buttons only call serverApi: the running state is synced via useServerStore from server events, never mutated here.
-// The theme is held in a single place by useTheme (same source as the top bar); saving merges it into the full settings package.
-import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, X, XCircle } from "lucide-react";
+// Settings center: five local subroutes with independent drafts and scoped persistence.
+// Runtime server status comes only from server events, never from the start/stop button.
+import { useEffect, useRef, useState } from "react";
+import { NavLink, Navigate, useParams } from "react-router-dom";
 import { ThemeSelector } from "@/components/ThemeSelector";
+import { SETTINGS_SECTIONS as sections } from "@/components/layout/nav";
+import { RuleCatalog } from "./RuleCatalog";
 import { useTheme } from "@/hooks/use-theme";
-import { serverApi, settingsApi, invokeErrorMessage } from "@/lib/api";
+import { invokeErrorMessage, serverApi, settingsApi } from "@/lib/api";
 import { useServerStore } from "@/stores/use-server-store";
-import type { GatewaySettings } from "@/types";
+import type { GatewaySettings, SettingsPatch } from "@/types";
 
-const cardCls = "rounded-lg border border-border bg-card p-4";
-const labelCls = "block text-sm font-medium";
-const inputCls =
-  "w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50";
-const hintCls = "mt-1 text-xs text-muted-foreground";
+type Section = (typeof sections)[number]["id"];
+
+const card = "rounded-xl border border-border bg-card p-5";
+const input = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary";
+const label = "block text-sm font-medium";
+const hint = "mt-1 text-xs text-muted-foreground";
+
+function Toggle({ text, detail, checked, onChange }: { text: string; detail?: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label className="flex items-center justify-between gap-4 border-b border-border py-3 last:border-0">
+      <span className="text-sm font-medium">{text}{detail && <span className="mt-1 block text-xs font-normal text-muted-foreground">{detail}</span>}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 shrink-0 accent-[var(--primary)]" />
+    </label>
+  );
+}
 
 export function SettingsPage() {
-  const { theme, changeTheme } = useTheme();
+  const { section } = useParams();
+  if (!sections.some((entry) => entry.id === section)) return <Navigate to="/settings/server" replace />;
+  return <SettingsSection key={section} section={section as Section} />;
+}
+
+function SettingsSection({ section }: { section: Section }) {
+  const { theme, changeTheme, themeError } = useTheme();
   const { running, host, port } = useServerStore();
   const [settings, setSettings] = useState<GatewaySettings | null>(null);
-  // Numeric fields are carried as strings and parsed/validated on save (consistent with the ApiKeyForm quota semantics).
   const [portInput, setPortInput] = useState("");
   const [retryInput, setRetryInput] = useState("");
-  const [auditScanLimitInput, setAuditScanLimitInput] = useState("");
+  const [scanInput, setScanInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [savedAt, setSavedAt] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [serverBusy, setServerBusy] = useState<"start" | "stop" | null>(null);
-  const [saveFeedback, setSaveFeedback] = useState<"success" | "error" | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const loaded = await settingsApi.get();
-      setSettings(loaded);
-      setPortInput(String(loaded.port));
-      setRetryInput(
-        loaded.retry.max_retries != null ? String(loaded.retry.max_retries) : "",
-      );
-      setAuditScanLimitInput(String(loaded.audit.scanByteLimit));
-      setLoadError(null);
-    } catch (error) {
-      setLoadError(invokeErrorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const [serverBusy, setServerBusy] = useState(false);
+  const editVersion = useRef(0);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let active = true;
+    settingsApi.get().then((value) => {
+      if (!active) return;
+      setSettings(value);
+      setPortInput(String(value.port));
+      setRetryInput(value.retry.max_retries == null ? "" : String(value.retry.max_retries));
+      setScanInput(String(value.audit.scanByteLimit));
+      setLoadError(null);
+    }).catch((error: unknown) => {
+      if (active) setLoadError(invokeErrorMessage(error));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
 
-  /** Update boolean / host fields in place (immutably). */
-  const setField = <K extends keyof GatewaySettings>(
-    key: K,
-    value: GatewaySettings[K],
-  ) => setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  function changeField<K extends keyof GatewaySettings>(key: K, value: GatewaySettings[K]) {
+    editVersion.current += 1;
+    setSettings((previous) => previous ? { ...previous, [key]: value } : previous);
+    setSaved(false);
+    setDirty(true);
+  }
+  function changeAudit<K extends keyof GatewaySettings["audit"]>(key: K, value: GatewaySettings["audit"][K]) {
+    editVersion.current += 1;
+    setSettings((previous) => previous ? { ...previous, audit: { ...previous.audit, [key]: value } } : previous);
+    setSaved(false);
+    setDirty(true);
+  }
 
-  const setRetryEnabled = (enabled: boolean) =>
-    setSettings((prev) =>
-      prev ? { ...prev, retry: { ...prev.retry, enabled } } : prev,
-    );
-
-  const setAuditField = <K extends keyof GatewaySettings["audit"]>(
-    key: K,
-    value: GatewaySettings["audit"][K],
-  ) =>
-    setSettings((prev) =>
-      prev ? { ...prev, audit: { ...prev.audit, [key]: value } } : prev,
-    );
-
-  async function handleSave() {
-    if (!settings) return;
-    const parsedPort = Number(portInput);
-    if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
-      setSaveError("端口必须是 0-65535 的整数（0 = 随机端口）");
-      setSaveFeedback("error");
-      return;
-    }
-    const parsedRetry = retryInput.trim() === "" ? null : Number(retryInput);
-    if (
-      parsedRetry !== null &&
-      (!Number.isInteger(parsedRetry) || parsedRetry < 0)
-    ) {
-      setSaveError("重试次数必须是非负整数，留空表示无上限");
-      setSaveFeedback("error");
-      return;
-    }
-    const parsedScanLimit = Number(auditScanLimitInput);
-    if (
-      !Number.isInteger(parsedScanLimit) ||
-      parsedScanLimit < 0 ||
-      parsedScanLimit > 10_000_000
-    ) {
-      setSaveError("审计扫描字节上限必须是 0-10000000 的整数");
-      setSaveFeedback("error");
-      return;
-    }
-    setSaving(true);
+  async function save() {
+    if (!settings || saving) return;
     setSaveError(null);
-    setSaveFeedback(null);
-    setSavedAt(null);
+    setSaved(false);
+    let patch: SettingsPatch;
+    if (section === "server") {
+      const parsed = Number(portInput);
+      if (portInput.trim() === "" || !Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+        setSaveError("端口必须是 0–65535 的整数，0 表示随机可用端口。");
+        return;
+      }
+      patch = { section, value: { host: settings.host, port: parsed } };
+    } else if (section === "desktop") {
+      patch = { section, value: { minimizeToTray: settings.minimizeToTray, closeToTray: settings.closeToTray, autostart: settings.autostart } };
+    } else if (section === "retry") {
+      const parsed = retryInput.trim() === "" ? null : Number(retryInput);
+      if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0 || parsed > 4294967295)) {
+        setSaveError("额外重试次数必须是非负整数，留空表示无上限。");
+        return;
+      }
+      patch = { section, value: { ...settings.retry, max_retries: parsed } };
+    } else if (section === "security") {
+      const parsed = Number(scanInput);
+      if (scanInput.trim() === "" || !Number.isInteger(parsed) || parsed < 0 || parsed > 10_000_000) {
+        setSaveError("扫描字节上限必须是 0–10000000 的整数。");
+        return;
+      }
+      patch = { section, value: { ...settings.audit, scanByteLimit: parsed } };
+    } else return;
+    const requestVersion = editVersion.current;
+    setSaving(true);
     try {
-      await settingsApi.save({
-        host: settings.host,
-        port: parsedPort,
-        theme,
-        minimizeToTray: settings.minimizeToTray,
-        closeToTray: settings.closeToTray,
-        autostart: settings.autostart,
-        retry: { enabled: settings.retry.enabled, max_retries: parsedRetry },
-        audit: {
-          ...settings.audit,
-          scanByteLimit: parsedScanLimit,
-        },
-        serviceModules: settings.serviceModules,
-      });
-      setSavedAt(new Date().toLocaleTimeString());
-      setSaveFeedback("success");
+      const result = await settingsApi.saveSection(patch);
+      if (editVersion.current === requestVersion) {
+        setSettings(result);
+        setDirty(false);
+        setSaved(true);
+      }
     } catch (error) {
       setSaveError(invokeErrorMessage(error));
-      setSaveFeedback("error");
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleStart() {
-    setServerBusy("start");
+  async function setServerRunning(start: boolean) {
+    setServerBusy(true);
     setServerError(null);
     try {
-      await serverApi.start();
+      if (start) await serverApi.start();
+      else await serverApi.stop();
     } catch (error) {
       setServerError(invokeErrorMessage(error));
     } finally {
-      setServerBusy(null);
+      setServerBusy(false);
     }
   }
 
-  async function handleStop() {
-    setServerBusy("stop");
-    setServerError(null);
-    try {
-      await serverApi.stop();
-    } catch (error) {
-      setServerError(invokeErrorMessage(error));
-    } finally {
-      setServerBusy(null);
-    }
-  }
-
-  const endpoint = running && host && port ? `${host}:${port}` : null;
-
+  const current = sections.find((entry) => entry.id === section)!;
+  const saveControls = (
+    <div className="flex flex-wrap items-center justify-end gap-3">
+      {dirty && !saving && <span className="text-sm text-muted-foreground" role="status">此页有未保存更改</span>}
+      {saved && <span className="text-sm text-success" role="status">此页设置已保存</span>}
+      {saveError && <span className="text-sm text-danger" role="alert">保存失败：{saveError}</span>}
+      <button type="button" onClick={() => void save()} disabled={saving} className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">{saving ? "保存中…" : "保存此页设置"}</button>
+    </div>
+  );
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 className="text-xl font-semibold tracking-tight">设置</h2><p className="mt-1 text-sm text-muted-foreground">管理服务运行方式、外观和安全策略。</p></div>
-        {savedAt && (
-          <span className="text-sm text-muted-foreground">
-            已保存 {savedAt}
-          </span>
-        )}
+    <div className="space-y-5">
+      <div><p className="text-xs font-semibold text-primary">设置中心 / {current.title}</p><h2 className="mt-1 text-2xl font-semibold">{current.title}</h2><p className="mt-1 text-sm text-muted-foreground">{current.description}</p></div>
+      <div className="grid items-start gap-5 md:grid-cols-[190px_minmax(0,1fr)]">
+        <nav aria-label="设置分类" className="flex gap-1 overflow-x-auto rounded-xl border border-border bg-card p-2 md:flex-col">
+          {sections.map((entry) => <NavLink key={entry.id} to={`/settings/${entry.id}`} className={({ isActive }) => `shrink-0 rounded-lg px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-primary ${isActive ? "bg-accent font-semibold text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}>{entry.title}</NavLink>)}
+        </nav>
+        <div className="min-w-0 space-y-4">
+          {loading && <p className="text-sm text-muted-foreground" role="status">加载中…</p>}
+          {loadError && <p className="text-sm text-danger" role="alert">设置加载失败：{loadError}</p>}
+          {settings && !loading && section === "server" && <>
+            <section className={card}><h3 className="text-base font-semibold">服务运行</h3><p className="mt-1 text-sm text-muted-foreground">{running ? `数据面监听 ${host}:${port}` : "数据面未启动"}，运行状态由服务事件更新。</p>
+              <button type="button" disabled={serverBusy} onClick={() => void setServerRunning(!running)} className="mt-4 rounded-lg border border-border px-4 py-2 text-sm text-primary hover:bg-accent disabled:opacity-50">{serverBusy ? "处理中…" : running ? "停止服务" : "启动服务"}</button>
+              {serverError && <p className="mt-2 text-sm text-danger" role="alert">{serverError}</p>}
+            </section>
+            <section className={card}><h3 className="mb-3 text-base font-semibold">服务监听</h3><div className="grid gap-4 sm:grid-cols-2"><div><label htmlFor="settings-host" className={label}>Host</label><input id="settings-host" className={input} value={settings.host} onChange={(event) => changeField("host", event.target.value)} /></div><div><label htmlFor="settings-port" className={label}>端口</label><input id="settings-port" type="number" min={0} max={65535} className={input} value={portInput} onChange={(event) => { editVersion.current += 1; setPortInput(event.target.value); setSaved(false); setDirty(true); }} /><p className={hint}>0 表示随机可用端口；启动服务使用已保存的值。</p></div></div></section>
+          </>}
+          {settings && !loading && section === "desktop" && <section className={card}><h3 className="text-base font-semibold">窗口与托盘</h3>
+            <Toggle text="最小化到托盘" checked={settings.minimizeToTray} onChange={(value) => changeField("minimizeToTray", value)} />
+            <Toggle text="关闭窗口时隐藏到托盘" checked={settings.closeToTray} onChange={(value) => changeField("closeToTray", value)} />
+            <Toggle text="开机自启" detail="保存时同步操作系统启动项，失败时不会标记已保存。" checked={settings.autostart} onChange={(value) => changeField("autostart", value)} />
+          </section>}
+          {settings && !loading && section === "appearance" && <section className={card}><h3 className="mb-3 text-base font-semibold">界面主题</h3><ThemeSelector theme={theme} onChange={changeTheme} /><p className={hint}>主题切换即时应用并单独保存，不覆盖其他子页。</p>{themeError && <p className="mt-2 text-sm text-danger" role="alert">主题保存失败：{themeError}</p>}</section>}
+          {settings && !loading && section === "retry" && <section className={card}><h3 className="text-base font-semibold">失败重试</h3><Toggle text="启用失败重试" checked={settings.retry.enabled} onChange={(value) => { changeField("retry", { ...settings.retry, enabled: value }); }} /><div className="mt-4 max-w-sm"><label className={label} htmlFor="settings-retry">最多额外重试次数</label><input id="settings-retry" className={input} type="number" min={0} value={retryInput} onChange={(event) => { editVersion.current += 1; setRetryInput(event.target.value); setSaved(false); setDirty(true); }} disabled={!settings.retry.enabled} /><p className={hint}>首次失败后按渠道顺序重试；留空表示没有额外次数上限。</p></div></section>}
+          {settings && !loading && section === "security" && <>
+            <section className={card}><h3 className="text-base font-semibold">请求审计</h3><Toggle text="启用安全审计" detail="只检查后续请求，不重扫历史日志；关闭不影响存储副本的脱敏。" checked={settings.audit.enabled} onChange={(value) => changeAudit("enabled", value)} />
+              <div className="mt-4 grid gap-4 sm:grid-cols-2"><div><label htmlFor="settings-mode" className={label}>执行模式</label><select id="settings-mode" className={input} value={settings.audit.mode} onChange={(event) => changeAudit("mode", event.target.value as GatewaySettings["audit"]["mode"])} disabled={!settings.audit.enabled}><option value="observe">观察（记录，不阻断）</option><option value="enforce">拦截（按 critical 策略）</option></select></div><div><label htmlFor="settings-limit" className={label}>扫描字节上限</label><input id="settings-limit" className={input} type="number" min={0} max={10000000} value={scanInput} onChange={(event) => { editVersion.current += 1; setScanInput(event.target.value); setSaved(false); setDirty(true); }} disabled={!settings.audit.enabled} /></div><div><label htmlFor="settings-evidence" className={label}>证据级别</label><select id="settings-evidence" className={input} value={settings.audit.evidenceLevel} onChange={(event) => changeAudit("evidenceLevel", event.target.value as GatewaySettings["audit"]["evidenceLevel"])} disabled={!settings.audit.enabled}><option value="summary">摘要</option><option value="detailed">详细</option></select></div></div>
+              <Toggle text="阻断 critical 风险" detail="仅拦截模式下对符合条件的严重风险生效。" checked={settings.audit.blockCritical} onChange={(value) => changeAudit("blockCritical", value)} />
+              <Toggle text="扫描 system 消息" checked={settings.audit.scanSystemMessages} onChange={(value) => changeAudit("scanSystemMessages", value)} />
+              <Toggle text="保存脱敏后的请求体" detail="本地存储脱敏独立于审计总开关，不改写发往上游的内容。" checked={settings.audit.storePayload} onChange={(value) => changeAudit("storePayload", value)} />
+            </section>
+            {saveControls}
+            <RuleCatalog />
+          </>}
+          {settings && !loading && section !== "appearance" && section !== "security" && saveControls}
+        </div>
       </div>
-
-      {loading && <p className="text-sm text-muted-foreground">加载中…</p>}
-      {loadError && (
-        <div className="flex items-center justify-between rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
-          <span>加载失败：{loadError}</span>
-          <button type="button" onClick={() => void load()} className="font-medium underline">重试</button>
-        </div>
-      )}
-      {saveFeedback && (
-        <div className={`fixed right-5 top-5 z-[60] flex w-[min(24rem,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border px-4 py-3 shadow-xl ${saveFeedback === "success" ? "border-success/30 bg-success text-white" : "border-danger/30 bg-danger text-white"}`} role={saveFeedback === "success" ? "status" : "alert"}>
-          {saveFeedback === "success" ? <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" /> : <XCircle className="mt-0.5 h-5 w-5 shrink-0" />}
-          <div className="min-w-0 flex-1">
-            <div className="font-semibold">{saveFeedback === "success" ? "设置保存成功" : "设置保存失败"}</div>
-            <div className="mt-1 text-sm text-white/85">{saveFeedback === "success" ? "新的配置已生效。" : saveError ?? "请检查输入后重试。"}</div>
-          </div>
-          <button type="button" onClick={() => setSaveFeedback(null)} className="rounded-md p-1 text-white/75 hover:bg-white/15 hover:text-white" aria-label="关闭提示"><X className="h-4 w-4" /></button>
-        </div>
-      )}
-      {!loading && !loadError && settings && (
-        <>
-          {/* Server running: start/stop buttons trigger the backend; the status indicator syncs via the event bridge */}
-          <section className={cardCls}>
-            <h3 className="mb-2 text-base font-semibold">服务运行</h3>
-            <div className="flex items-center gap-3">
-              {running ? (
-                <button
-                  type="button"
-                  onClick={handleStop}
-                  disabled={serverBusy === "stop"}
-                  className="rounded-md border border-border px-3 py-1.5 text-sm text-danger hover:bg-muted disabled:opacity-50"
-                >
-                  {serverBusy === "stop" ? "停止中…" : "停止服务"}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleStart}
-                  disabled={serverBusy === "start"}
-                  className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90 disabled:opacity-50"
-                >
-                  {serverBusy === "start" ? "启动中…" : "启动服务"}
-                </button>
-              )}
-              <p className="text-sm text-muted-foreground">
-                {endpoint ? `数据面监听 ${endpoint}` : "数据面未启动"}
-              </p>
-            </div>
-            <p className={hintCls}>
-              启动按已保存的 host / 端口生效；运行状态由服务事件实时同步。
-            </p>
-            {serverError && (
-              <p className="mt-1 text-sm text-danger" role="alert">
-                {serverError}
-              </p>
-            )}
-          </section>
-
-          {/* Server listener: host + port (0 = random) */}
-          <section className={cardCls}>
-            <h3 className="mb-3 text-base font-semibold">服务监听</h3>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls} htmlFor="settings-host">
-                  Host
-                </label>
-                <input
-                  id="settings-host"
-                  className={inputCls}
-                  value={settings.host}
-                  onChange={(e) => setField("host", e.target.value)}
-                  placeholder="如 127.0.0.1"
-                />
-              </div>
-              <div>
-                <label className={labelCls} htmlFor="settings-port">
-                  端口
-                </label>
-                <input
-                  id="settings-port"
-                  className={inputCls}
-                  type="number"
-                  min={0}
-                  max={65535}
-                  value={portInput}
-                  onChange={(e) => setPortInput(e.target.value)}
-                  placeholder="如 3000"
-                />
-                <p className={hintCls}>0 = 随机可用端口。</p>
-              </div>
-            </div>
-          </section>
-
-          {/* Theme tri-state: same source as the top bar; changes apply and persist immediately */}
-          <section className={cardCls}>
-            <h3 className="mb-3 text-base font-semibold">界面主题</h3>
-            <div className="flex items-center gap-3">
-              <ThemeSelector theme={theme} onChange={changeTheme} />
-              <span className="text-sm text-muted-foreground">
-                跟随系统不写暗色变量，由 CSS 媒体查询响应。
-              </span>
-            </div>
-          </section>
-
-          {/* Tray and autostart */}
-          <section className={cardCls}>
-            <h3 className="mb-3 text-base font-semibold">托盘与开机自启</h3>
-            <div className="space-y-2">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={settings.minimizeToTray}
-                  onChange={(e) => setField("minimizeToTray", e.target.checked)}
-                  className="h-4 w-4 accent-[var(--primary)]"
-                />
-                最小化到托盘
-              </label>
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={settings.closeToTray}
-                  onChange={(e) => setField("closeToTray", e.target.checked)}
-                  className="h-4 w-4 accent-[var(--primary)]"
-                />
-                关闭窗口时隐藏到托盘
-              </label>
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={settings.autostart}
-                  onChange={(e) => setField("autostart", e.target.checked)}
-                  className="h-4 w-4 accent-[var(--primary)]"
-                />
-                开机自启
-              </label>
-            </div>
-            <p className={hintCls}>
-              托盘行为即时生效；开机自启在保存时同步操作系统启动项。
-            </p>
-          </section>
-
-          {/* Failure retry policy */}
-          <section className={cardCls}>
-            <h3 className="mb-3 text-base font-semibold">失败重试</h3>
-            <div className="space-y-4">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={settings.retry.enabled}
-                  onChange={(e) => setRetryEnabled(e.target.checked)}
-                  className="h-4 w-4 accent-[var(--primary)]"
-                />
-                启用失败重试
-              </label>
-              <div className="max-w-xs">
-                <label className={labelCls} htmlFor="settings-retry">
-                  最大重试次数（留空 = 无上限）
-                </label>
-                <input
-                  id="settings-retry"
-                  className={inputCls}
-                  type="number"
-                  min={0}
-                  value={retryInput}
-                  onChange={(e) => setRetryInput(e.target.value)}
-                  placeholder="留空 = 无上限"
-                  disabled={!settings.retry.enabled}
-                />
-                <p className={hintCls}>
-                  首次请求失败后按渠道优先级逐个重试；次数为首次之后的额外尝试次数。
-                </p>
-              </div>
-            </div>
-          </section>
-
-          {/* 安全审计策略 */}
-          <section className={cardCls}>
-            <h3 className="mb-3 text-base font-semibold">安全审计</h3>
-            <div className="space-y-4">
-              <label className="flex items-center gap-2 text-sm font-medium">
-                <input
-                  type="checkbox"
-                  checked={settings.audit.enabled}
-                  onChange={(e) => setAuditField("enabled", e.target.checked)}
-                  className="h-4 w-4 accent-[var(--primary)]"
-                />
-                启用请求审计
-              </label>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className={labelCls} htmlFor="settings-audit-mode">
-                    模式
-                  </label>
-                  <select
-                    id="settings-audit-mode"
-                    className={inputCls}
-                    value={settings.audit.mode}
-                    onChange={(e) =>
-                      setAuditField(
-                        "mode",
-                        e.target.value as GatewaySettings["audit"]["mode"],
-                      )
-                    }
-                    disabled={!settings.audit.enabled}
-                  >
-                    <option value="observe">观察</option>
-                    <option value="enforce">拦截</option>
-                  </select>
-                </div>
-                <div>
-                  <label className={labelCls} htmlFor="settings-audit-limit">
-                    扫描字节上限
-                  </label>
-                  <input
-                    id="settings-audit-limit"
-                    className={inputCls}
-                    type="number"
-                    min={0}
-                    max={10000000}
-                    value={auditScanLimitInput}
-                    onChange={(e) => setAuditScanLimitInput(e.target.value)}
-                    disabled={!settings.audit.enabled}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls} htmlFor="settings-audit-evidence">
-                    证据级别
-                  </label>
-                  <select
-                    id="settings-audit-evidence"
-                    className={inputCls}
-                    value={settings.audit.evidenceLevel}
-                    onChange={(e) =>
-                      setAuditField(
-                        "evidenceLevel",
-                        e.target.value as GatewaySettings["audit"]["evidenceLevel"],
-                      )
-                    }
-                    disabled={!settings.audit.enabled}
-                  >
-                    <option value="summary">摘要</option>
-                    <option value="detailed">详细</option>
-                  </select>
-                </div>
-              </div>
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 text-sm font-medium">
-                  <input
-                    type="checkbox"
-                    checked={settings.audit.blockCritical}
-                    onChange={(e) =>
-                      setAuditField("blockCritical", e.target.checked)
-                    }
-                    disabled={!settings.audit.enabled}
-                    className="h-4 w-4 accent-[var(--primary)] disabled:opacity-50"
-                  />
-                  拦截 critical 风险
-                </label>
-                <label className="flex items-center gap-2 text-sm font-medium">
-                  <input
-                    type="checkbox"
-                    checked={settings.audit.scanSystemMessages}
-                    onChange={(e) =>
-                      setAuditField("scanSystemMessages", e.target.checked)
-                    }
-                    disabled={!settings.audit.enabled}
-                    className="h-4 w-4 accent-[var(--primary)] disabled:opacity-50"
-                  />
-                  扫描 system messages
-                </label>
-                <label className="flex items-center gap-2 text-sm font-medium">
-                  <input
-                    type="checkbox"
-                    checked={settings.audit.storePayload}
-                    onChange={(e) =>
-                      setAuditField("storePayload", e.target.checked)
-                    }
-                    className="h-4 w-4 accent-[var(--primary)]"
-                  />
-                  保存原始请求体
-                </label>
-              </div>
-            </div>
-          </section>
-
-          {saveError && (
-            <p className="text-sm text-danger" role="alert">
-              保存失败：{saveError}
-            </p>
-          )}
-          <div className="sticky bottom-3 z-10 flex justify-end rounded-xl border border-border bg-card/90 p-2 shadow-lg backdrop-blur-sm">
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:opacity-90 disabled:opacity-50"
-            >
-              {saving ? "保存中…" : "保存设置"}
-            </button>
-          </div>
-        </>
-      )}
     </div>
   );
 }

@@ -5,13 +5,67 @@
 //! infrastructure, this layer only depends on the domain trait. Save success semantics = the repository has persisted.
 
 use crate::domain::error::RepositoryError;
-use crate::domain::settings::{GatewaySettings, SettingsRepository};
+use serde::Deserialize;
+
+use crate::domain::security_audit::AuditSettings;
+use crate::domain::settings::{GatewaySettings, RetryPolicy, SettingsRepository, Theme};
+
+/// A scoped settings update; callers cannot overwrite fields owned by another page.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "section", content = "value", rename_all = "camelCase")]
+pub enum SettingsPatch {
+    Server(ServerSettings),
+    Desktop(DesktopSettings),
+    Appearance(Theme),
+    Retry(RetryPolicy),
+    Security(AuditSettings),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSettings {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSettings {
+    pub minimize_to_tray: bool,
+    pub close_to_tray: bool,
+    pub autostart: bool,
+}
+
+impl SettingsPatch {
+    pub fn apply_to(self, current: &mut GatewaySettings) {
+        match self {
+            Self::Server(value) => {
+                current.host = value.host;
+                current.port = value.port;
+            }
+            Self::Desktop(value) => {
+                current.minimize_to_tray = value.minimize_to_tray;
+                current.close_to_tray = value.close_to_tray;
+                current.autostart = value.autostart;
+            }
+            Self::Appearance(value) => current.theme = value,
+            Self::Retry(value) => current.retry = value,
+            Self::Security(value) => current.audit = value,
+        }
+    }
+
+    pub fn changes_autostart(&self) -> bool {
+        matches!(self, Self::Desktop(_))
+    }
+}
 
 /// Settings use case layer error.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
     #[error("invalid host: {0}")]
     InvalidHost(String),
+    #[error("audit scan byte limit exceeds 10000000: {0}")]
+    InvalidAuditScanLimit(u32),
     #[error("settings repository error: {0}")]
     Repository(#[from] RepositoryError),
 }
@@ -48,6 +102,11 @@ impl SaveSettingsUsecase {
 pub(crate) fn validate(settings: &GatewaySettings) -> Result<(), SettingsError> {
     if settings.host.trim().is_empty() {
         return Err(SettingsError::InvalidHost(settings.host.clone()));
+    }
+    if settings.audit.scan_byte_limit > 10_000_000 {
+        return Err(SettingsError::InvalidAuditScanLimit(
+            settings.audit.scan_byte_limit,
+        ));
     }
     Ok(())
 }
@@ -120,6 +179,40 @@ mod tests {
         );
     }
 
+    /// Scoped updates preserve other sections even when the caller only has old page data.
+    #[tokio::test]
+    async fn scoped_updates_preserve_unrelated_sections() {
+        let repo = InMemorySettingsRepository::new();
+        let mut current = GetSettingsUsecase.execute(&repo).await.expect("load");
+        current.service_modules.knowledge = false;
+        SaveSettingsUsecase
+            .execute(&repo, current)
+            .await
+            .expect("save");
+
+        let patches = [
+            serde_json::json!({"section":"appearance","value":"dark"}),
+            serde_json::json!({"section":"security","value":{"enabled":true}}),
+            serde_json::json!({"section":"server","value":{"host":" 0.0.0.0 ","port":0}}),
+        ];
+        for value in patches {
+            let patch: SettingsPatch = serde_json::from_value(value).expect("valid patch");
+            let mut current = GetSettingsUsecase.execute(&repo).await.expect("load");
+            patch.apply_to(&mut current);
+            SaveSettingsUsecase
+                .execute(&repo, current)
+                .await
+                .expect("save");
+        }
+        let saved = GetSettingsUsecase.execute(&repo).await.expect("load");
+        assert_eq!(saved.theme, Theme::Dark);
+        assert!(saved.audit.enabled);
+        assert_eq!(saved.host, "0.0.0.0");
+        assert_eq!(saved.port, 0);
+        assert!(!saved.service_modules.knowledge);
+        assert!(saved.retry.enabled);
+    }
+
     /// Save: a blank host is rejected and not persisted (trust-boundary validation).
     #[tokio::test]
     async fn save_rejects_blank_host() {
@@ -140,6 +233,19 @@ mod tests {
             GatewaySettings::default(),
             "校验失败不落库"
         );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_oversized_audit_scan_limit() {
+        let repo = InMemorySettingsRepository::new();
+        let mut settings = GatewaySettings::default();
+        settings.audit.scan_byte_limit = 10_000_001;
+        let error = SaveSettingsUsecase
+            .execute(&repo, settings)
+            .await
+            .expect_err("oversized limit should be rejected");
+        assert!(matches!(error, SettingsError::InvalidAuditScanLimit(_)));
+        assert_eq!(repo.load().await.expect("load"), GatewaySettings::default());
     }
 
     /// Save: the host is trimmed, persisted, and the normalized value is returned (same normalization approach as api_key names).

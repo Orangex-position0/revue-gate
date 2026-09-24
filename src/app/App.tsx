@@ -1,4 +1,4 @@
-// Root app component: Layout wrapping 5 page routes (thin shell). Routes are defined here; no business logic or startup side effects.
+// Root app component: Layout and routes, including independent settings subroutes.
 import { MemoryRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { ApiKeysPage } from "@/pages/api-keys/ApiKeysPage";
@@ -23,7 +23,8 @@ export function App() {
           <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/knowledge" element={<KnowledgeBasePage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/settings" element={<Navigate to="/settings/server" replace />} />
+          <Route path="/settings/:section" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
         </Routes>

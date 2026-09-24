@@ -37,7 +37,9 @@ use interface::commands::server::{
     get_server_status, resolve_host_port, start_gateway, start_server, stop_gateway, stop_server,
 };
 use interface::commands::services::get_service_statuses;
-use interface::commands::settings::{apply_autostart, get_settings, save_settings};
+use interface::commands::settings::{
+    apply_autostart, get_security_rules, get_settings, save_settings_section,
+};
 use interface::commands::stats::{get_stats, usage_stats};
 use interface::http::handlers::AppState;
 use interface::http::server::ServerManager;
@@ -152,7 +154,8 @@ pub fn run() {
             stop_server,
             get_service_statuses,
             get_settings,
-            save_settings,
+            save_settings_section,
+            get_security_rules,
             list_channels,
             create_channel,
             update_channel,
@@ -246,6 +249,7 @@ pub fn run() {
             };
             let shared = Arc::new(RwLock::new(settings));
             app.manage(shared.clone());
+            app.manage(tokio::sync::Mutex::new(()));
             app.manage(settings_repo);
 
             // 1d) Data-plane AppState: Arc repositories sharing the same pool + the forwarding usecase (shared settings injected so

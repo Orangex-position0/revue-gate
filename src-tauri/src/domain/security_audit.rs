@@ -788,6 +788,14 @@ fn detector_rules(policy: &AuditPolicy) -> Vec<DetectorRule> {
             suggested_action: "Rotate the credential and remove it from the request payload.",
         },
         DetectorRule {
+            id: "credential.session_token",
+            category: "credential",
+            risk_level: RiskLevel::High,
+            action: AuditAction::Warn,
+            confidence: AuditConfidence::High,
+            suggested_action: "Remove the session token from the request payload.",
+        },
+        DetectorRule {
             id: "credential.local_revue_key",
             category: "credential",
             risk_level: RiskLevel::High,
@@ -902,6 +910,69 @@ fn detector_rules(policy: &AuditPolicy) -> Vec<DetectorRule> {
     ]
 }
 
+/// Read-only projection of the rules actually registered for scanning.
+/// These names describe detector behavior, not user-editable rule records.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleCatalogEntry {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub category: &'static str,
+    pub default_risk_level: RiskLevel,
+    pub description: &'static str,
+}
+
+pub fn rule_catalog() -> Vec<RuleCatalogEntry> {
+    let policy = AuditPolicy::from(&AuditSettings::default());
+    detector_rules(&policy)
+        .into_iter()
+        .map(|rule| {
+            let (name, description) = match rule.id {
+                "credential.private_key" => ("私钥块", "识别完整 PEM/OpenSSH 私钥块"),
+                "credential.provider_api_key" => ("供应商 API Key", "识别常见供应商密钥格式"),
+                "credential.aws_access_key_id" => ("AWS 访问密钥 ID", "识别 AKIA/ASIA 访问密钥 ID"),
+                "credential.aws_secret_access_key" => {
+                    ("AWS 私密访问密钥", "识别带字段名的 AWS Secret")
+                }
+                "credential.gcp_oauth_token" => ("GCP OAuth 令牌", "识别 GCP OAuth 令牌"),
+                "credential.azure_storage_connection_string" => {
+                    ("Azure 存储连接串", "识别存储连接串中的凭证")
+                }
+                "credential.database_url" => ("数据库连接串", "识别含凭证的数据库 URL"),
+                "credential.bearer_token" => ("Bearer Token", "识别 Bearer 访问令牌"),
+                "credential.jwt" => ("JWT", "识别三段式 JWT"),
+                "credential.session_token" => ("会话令牌", "识别有实际值的会话凭证字段"),
+                "credential.local_revue_key" => ("本地网关密钥", "识别 sk-revue- 访问密钥"),
+                "sensitive_path.local_secret" => ("本地敏感路径", "识别 .env、SSH 与云凭证路径"),
+                "unicode.zero_width" => ("零宽字符", "识别隐藏的零宽字符"),
+                "unicode.bidi_control" => ("方向控制字符", "识别改变文字视觉顺序的控制字符"),
+                "prompt_injection.phrase" => ("提示注入短语", "识别高置信的越权指令短语"),
+                "pii.email" => ("邮箱地址", "识别邮件地址样式的个人信息"),
+                "pii.phone" => ("电话号码", "识别保守的 phone-like 格式"),
+                "tool.downloadExecute" => ("下载后执行", "识别下载脚本并执行的命令组合"),
+                "tool.powershellDownloadExecute" => {
+                    ("PowerShell 下载执行", "识别 PowerShell 下载执行命令")
+                }
+                "tool.sensitiveFileExfiltration" => {
+                    ("敏感文件外传", "识别读取敏感文件并向外传输的命令")
+                }
+                "network.privateLiteral" => ("内网地址", "识别回环、私有与链路本地地址"),
+                "network.metadataIp" => ("元数据地址", "识别云实例元数据 IP"),
+                "network.webhookOrTunnelHost" => ("Webhook 与隧道", "识别临时 Webhook 或隧道地址"),
+                "network.ipProbeHost" => ("公网 IP 探测", "识别查询公网 IP 的服务地址"),
+                _ => (rule.id, "检测规则"),
+            };
+            RuleCatalogEntry {
+                id: rule.id,
+                name,
+                category: rule.category,
+                default_risk_level: rule.risk_level,
+                description,
+            }
+        })
+        .collect()
+}
+
 fn find_rule_matches(rule_id: &str, text: &str) -> Vec<MatchSpan> {
     match rule_id {
         "credential.private_key" => find_private_key_blocks(text),
@@ -927,6 +998,9 @@ fn find_rule_matches(rule_id: &str, text: &str) -> Vec<MatchSpan> {
         ),
         "credential.bearer_token" => find_bearer_tokens(text),
         "credential.jwt" => find_jwt_tokens(text),
+        "credential.session_token" => {
+            find_assignment_secret(text, &["sessionid", "session_token", "auth_token"], 20)
+        }
         "credential.local_revue_key" => find_prefixed_secrets(text, &["sk-revue-"], 25),
         "sensitive_path.local_secret" => find_sensitive_paths(text),
         "unicode.zero_width" => find_zero_width_chars(text),
@@ -1832,6 +1906,23 @@ mod tests {
     }
 
     #[test]
+    fn catalog_projects_every_registered_detector() {
+        let catalog = rule_catalog();
+        let policy = AuditPolicy::from(&AuditSettings::default());
+        let rules = detector_rules(&policy);
+        assert_eq!(catalog.len(), rules.len());
+        assert!(catalog.iter().all(|item| {
+            rules
+                .iter()
+                .any(|rule| rule.id == item.id && rule.risk_level == item.default_risk_level)
+                && item.name != item.id
+                && item.description != "检测规则"
+        }));
+        let unique: std::collections::HashSet<_> = catalog.iter().map(|item| item.id).collect();
+        assert_eq!(unique.len(), catalog.len());
+    }
+
+    #[test]
     fn risk_score_uses_fixed_mvp_mapping() {
         assert_eq!(risk_score(RiskLevel::Clean), 0);
         assert_eq!(risk_score(RiskLevel::Info), 10);
@@ -1897,6 +1988,12 @@ mod tests {
                 "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
                 "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ",
                 "release.notes.have.periods but are not tokens",
+            ),
+            (
+                "credential.session_token",
+                "sessionid=abcdefghijklmnopqrstuvwxyz0123456789",
+                "sessionid=short",
+                "sessionid is a documented field name without a value",
             ),
             (
                 "credential.local_revue_key",
@@ -2921,6 +3018,27 @@ mod tests {
         assert_eq!(
             out["messages"][0]["role"], "user",
             "JSON structure preserved"
+        );
+    }
+
+    #[test]
+    fn session_token_is_warned_and_only_local_storage_copy_is_redacted() {
+        let secret = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let body = json!({"messages": [{"role":"user", "content":format!("sessionid={secret}")}]});
+        let report = AuditReport::for_scope(
+            &policy(false, 10_000),
+            &build_audit_scope(&body, &policy(false, 10_000)),
+        );
+        assert!(rule_ids(&report).contains(&"credential.session_token"));
+        assert_ne!(report.action, AuditAction::Block);
+        let stored = redact_body(&body, &policy(false, 10_000));
+        let masked = stored["messages"][0]["content"]
+            .as_str()
+            .expect("stored text");
+        assert_eq!(masked, "sessionid=[redacted:credential.session_token]");
+        assert_eq!(
+            body["messages"][0]["content"],
+            format!("sessionid={secret}")
         );
     }
 

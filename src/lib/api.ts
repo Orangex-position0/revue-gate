@@ -7,6 +7,8 @@ import type {
   ChannelInput,
   ChannelTestResult,
   GatewaySettings,
+  SettingsPatch,
+  RuleCatalogEntry,
   LogDetail,
   LogPage,
   LogQuery,
@@ -38,9 +40,11 @@ export const serverApi = {
 export const settingsApi = {
   /** Read the settings snapshot (returns defaults when nothing has been persisted). */
   get: () => invoke<GatewaySettings>("get_settings"),
-  /** Save the full settings snapshot: validate → apply autostart → persist → update shared settings (effective immediately). */
-  save: (settings: GatewaySettings) =>
-    invoke<void>("save_settings", { settings }),
+  /** Atomically update one settings section, returning the normalized current snapshot. */
+  saveSection: (patch: SettingsPatch) =>
+    invoke<GatewaySettings>("save_settings_section", { patch }),
+  /** Read-only catalog generated from active detector definitions. */
+  rules: () => invoke<RuleCatalogEntry[]>("get_security_rules"),
 };
 
 export const serviceApi = {

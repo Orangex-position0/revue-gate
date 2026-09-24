@@ -1,10 +1,11 @@
-// Dashboard page: 6 stat cards (today/cumulative request counts and Tokens, average latency, channel availability) + 7-day request/Token trend lines.
+// Dashboard page: seven stat cards (including enabled/total channels) + 7-day request/Token trends.
 // Data is local useState + load() (see Architecture-frontend.md "business data does not go into the store").
 // Trend charts use inline SVG polylines, no chart library (ticket 11 needs no polymorphic charts, per the ponytail principle).
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, ArrowRight, KeyRound, Network, Play, Server, Settings2 } from "lucide-react";
-import { statsApi, invokeErrorMessage } from "@/lib/api";
+import { Activity, ArrowRight, Clock3, Hash, KeyRound, Layers3, Network, Play, Server, Settings2, ShieldCheck, Sigma } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { channelApi, statsApi, invokeErrorMessage } from "@/lib/api";
 import type { DailyStat, StatsSnapshot } from "@/types";
 
 const cardCls =
@@ -110,16 +111,25 @@ function StatCard({
   label,
   value,
   sub,
+  icon: Icon,
+  tone,
 }: {
   label: string;
   value: string;
   sub: string;
+  icon: LucideIcon;
+  tone?: "channel" | "quality";
 }) {
   return (
-    <div className={cardCls}>
-      <p className={labelCls}>{label}</p>
+    <div className={`${cardCls} flex min-h-36 flex-col ${tone === "channel" ? "border-primary/25 bg-accent/50" : tone === "quality" ? "border-success/25 bg-success/5" : ""}`}>
+      <div className="flex items-start justify-between gap-2">
+        <p className={labelCls}>{label}</p>
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${tone === "quality" ? "bg-success/10 text-success" : "bg-accent text-primary"}`}>
+          <Icon className="h-4 w-4" aria-hidden="true" />
+        </span>
+      </div>
       <p className={valueCls}>{value}</p>
-      <p className={subCls}>{sub}</p>
+      <p className={`${subCls} mt-auto pt-2`}>{sub}</p>
     </div>
   );
 }
@@ -129,18 +139,34 @@ export function DashboardPage() {
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [channelCounts, setChannelCounts] = useState<{ enabled: number; total: number } | null>(null);
+  const [channelError, setChannelError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      // The backend aggregates by the frontend's local-timezone day boundary; getTimezoneOffset() returns minutes, positive west (matches the backend convention).
-      setStats(await statsApi.get(new Date().getTimezoneOffset()));
+    // The two data sources fail independently: a channel query failure must not erase log metrics.
+    const [statsResult, channelsResult] = await Promise.allSettled([
+      statsApi.get(new Date().getTimezoneOffset()),
+      channelApi.list(),
+    ]);
+    if (statsResult.status === "fulfilled") {
+      setStats(statsResult.value);
       setLoadError(null);
-    } catch (error) {
-      setLoadError(invokeErrorMessage(error));
-    } finally {
-      setLoading(false);
+    } else {
+      setStats(null);
+      setLoadError(invokeErrorMessage(statsResult.reason));
     }
+    if (channelsResult.status === "fulfilled") {
+      setChannelCounts({
+        enabled: channelsResult.value.filter((channel) => channel.enabled).length,
+        total: channelsResult.value.length,
+      });
+      setChannelError(null);
+    } else {
+      setChannelCounts(null);
+      setChannelError(invokeErrorMessage(channelsResult.reason));
+    }
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -170,17 +196,17 @@ export function DashboardPage() {
                 <Network className="h-4 w-4" /> 配置渠道
               </button>
               <button type="button" onClick={() => navigate("/usage")} className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium transition-colors hover:bg-muted">
-                查看接入示例 <ArrowRight className="h-4 w-4" />
+                查看用量统计 <ArrowRight className="h-4 w-4" />
               </button>
             </div>
           </div>
           <div className="min-w-52 rounded-2xl border border-border bg-background/70 p-4">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">当前可用率</span>
+              <span className="text-xs font-medium text-muted-foreground">请求成功占比</span>
               <Server className="h-4 w-4 text-success" />
             </div>
-            <div className="mt-2 text-3xl font-semibold tabular-nums">{loading || !stats ? "—" : formatPercent(stats.channelAvailability)}</div>
-            <div className="mt-1 text-xs text-muted-foreground">基于最近请求状态</div>
+            <div className="mt-2 text-3xl font-semibold tabular-nums">{loading || !stats ? "—" : stats.totalRequests === 0 ? "暂无请求" : formatPercent(stats.channelAvailability)}</div>
+            <div className="mt-1 text-xs text-muted-foreground">全部日志中 status &lt; 400 的请求占比</div>
           </div>
         </div>
       </section>
@@ -194,46 +220,61 @@ export function DashboardPage() {
       </div>
 
       {loadError && (
-        <p className="text-sm text-danger" role="alert">
-          加载失败：{loadError}
-        </p>
+        <p className="text-sm text-danger" role="alert">统计加载失败：{loadError}</p>
+      )}
+      {channelError && (
+        <p className="text-sm text-danger" role="alert">渠道数量加载失败：{channelError}</p>
       )}
 
       {/* Card grid */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
         <StatCard
           label="今日请求数"
+          icon={Activity}
           value={loading || !stats ? "—" : formatCount(stats.todayRequests)}
           sub="本地时区今日"
         />
         <StatCard
           label="今日 Token"
+          icon={Hash}
           value={loading || !stats ? "—" : formatCount(stats.todayTokens)}
           sub="本地时区今日"
         />
         <StatCard
           label="累计请求数"
+          icon={Layers3}
           value={loading || !stats ? "—" : formatCount(stats.totalRequests)}
           sub="全部日志"
         />
         <StatCard
           label="累计 Token"
+          icon={Sigma}
           value={loading || !stats ? "—" : formatCount(stats.totalTokens)}
           sub="全部日志"
         />
         <StatCard
+          label="已启用渠道"
+          icon={Network}
+          value={loading || !channelCounts ? "—" : `${channelCounts.enabled} / ${channelCounts.total}`}
+          sub="按渠道配置统计，非探活结果"
+          tone="channel"
+        />
+        <StatCard
           label="平均延迟"
+          icon={Clock3}
           value={
             loading || !stats
               ? "—"
-              : `${Math.round(stats.avgLatencyMs * 10) / 10} ms`
+              : stats.totalRequests === 0 ? "暂无请求" : `${Math.round(stats.avgLatencyMs * 10) / 10} ms`
           }
           sub="全部请求均值"
         />
         <StatCard
           label="渠道可用率"
-          value={loading || !stats ? "—" : formatPercent(stats.channelAvailability)}
-          sub="status < 400 占比"
+          icon={ShieldCheck}
+          value={loading || !stats ? "—" : stats.totalRequests === 0 ? "暂无请求" : formatPercent(stats.channelAvailability)}
+          sub="status < 400 的请求占比"
+          tone="quality"
         />
       </div>
 

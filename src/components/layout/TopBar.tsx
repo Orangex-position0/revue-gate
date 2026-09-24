@@ -3,14 +3,19 @@ import { useLocation } from "react-router-dom";
 import { ThemeSelector } from "@/components/ThemeSelector";
 import { useTheme } from "@/hooks/use-theme";
 import { useServerStore } from "@/stores/use-server-store";
-import { NAV_ITEMS } from "./nav";
+import { NAV_ITEMS, SETTINGS_SECTIONS } from "./nav";
 
 export function TopBar() {
   const { pathname } = useLocation();
-  const { theme, changeTheme } = useTheme();
+  const { theme, changeTheme, themeError } = useTheme();
   const { running, host, port } = useServerStore();
 
-  const currentLabel = NAV_ITEMS.find((item) => pathname.startsWith(item.path))?.label ?? "工作台";
+  const settingsSection = pathname.startsWith("/settings/")
+    ? SETTINGS_SECTIONS.find((entry) => pathname === `/settings/${entry.id}`)
+    : null;
+  const currentLabel = settingsSection
+    ? `设置 / ${settingsSection.title}`
+    : NAV_ITEMS.find((item) => pathname.startsWith(item.path))?.label ?? "工作台";
   const endpoint = running && host && port ? `${host}:${port}` : "服务未启动";
 
   return (
@@ -31,6 +36,7 @@ export function TopBar() {
         </div>
 
         {/* Theme tri-state: switching applies the theme and persists it; system is handled by the CSS media query. */}
+        {themeError && <span className="max-w-40 text-xs text-danger" role="alert">主题保存失败：{themeError}</span>}
         <ThemeSelector theme={theme} onChange={changeTheme} />
       </div>
     </header>

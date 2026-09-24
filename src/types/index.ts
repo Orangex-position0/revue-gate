@@ -284,6 +284,15 @@ export interface AuditSettings {
   evidenceLevel: AuditEvidenceLevel;
 }
 
+/** Read-only metadata projected from the detectors registered at runtime. */
+export interface RuleCatalogEntry {
+  id: string;
+  name: string;
+  category: string;
+  defaultRiskLevel: RiskLevel;
+  description: string;
+}
+
 export interface ServiceModuleSettings {
   knowledge: boolean;
   mcp: boolean;
@@ -298,6 +307,14 @@ export interface ServiceModuleStatus {
   running: boolean;
   stats: Record<string, unknown>;
 }
+
+/** Scoped settings writes, serialized as { section, value } by the backend tagged enum. */
+export type SettingsPatch =
+  | { section: "server"; value: Pick<GatewaySettings, "host" | "port"> }
+  | { section: "desktop"; value: Pick<GatewaySettings, "minimizeToTray" | "closeToTray" | "autostart"> }
+  | { section: "appearance"; value: Theme }
+  | { section: "retry"; value: RetryPolicy }
+  | { section: "security"; value: AuditSettings };
 
 /** Gateway settings snapshot: aligned with the backend GatewaySettings serde camelCase; port 0 = random port. */
 export interface GatewaySettings {
