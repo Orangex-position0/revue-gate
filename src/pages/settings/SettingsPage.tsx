@@ -3,6 +3,7 @@
 // The start/stop buttons only call serverApi: the running state is synced via useServerStore from server events, never mutated here.
 // The theme is held in a single place by useTheme (same source as the top bar); saving merges it into the full settings package.
 import { useCallback, useEffect, useState } from "react";
+import { CheckCircle2, X, XCircle } from "lucide-react";
 import { ThemeSelector } from "@/components/ThemeSelector";
 import { useTheme } from "@/hooks/use-theme";
 import { serverApi, settingsApi, invokeErrorMessage } from "@/lib/api";
@@ -30,6 +31,7 @@ export function SettingsPage() {
   const [savedAt, setSavedAt] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
   const [serverBusy, setServerBusy] = useState<"start" | "stop" | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<"success" | "error" | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,6 +79,7 @@ export function SettingsPage() {
     const parsedPort = Number(portInput);
     if (!Number.isInteger(parsedPort) || parsedPort < 0 || parsedPort > 65535) {
       setSaveError("端口必须是 0-65535 的整数（0 = 随机端口）");
+      setSaveFeedback("error");
       return;
     }
     const parsedRetry = retryInput.trim() === "" ? null : Number(retryInput);
@@ -85,6 +88,7 @@ export function SettingsPage() {
       (!Number.isInteger(parsedRetry) || parsedRetry < 0)
     ) {
       setSaveError("重试次数必须是非负整数，留空表示无上限");
+      setSaveFeedback("error");
       return;
     }
     const parsedScanLimit = Number(auditScanLimitInput);
@@ -94,10 +98,12 @@ export function SettingsPage() {
       parsedScanLimit > 10_000_000
     ) {
       setSaveError("审计扫描字节上限必须是 0-10000000 的整数");
+      setSaveFeedback("error");
       return;
     }
     setSaving(true);
     setSaveError(null);
+    setSaveFeedback(null);
     setSavedAt(null);
     try {
       await settingsApi.save({
@@ -115,8 +121,10 @@ export function SettingsPage() {
         serviceModules: settings.serviceModules,
       });
       setSavedAt(new Date().toLocaleTimeString());
+      setSaveFeedback("success");
     } catch (error) {
       setSaveError(invokeErrorMessage(error));
+      setSaveFeedback("error");
     } finally {
       setSaving(false);
     }
@@ -164,6 +172,16 @@ export function SettingsPage() {
         <div className="flex items-center justify-between rounded-xl border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">
           <span>加载失败：{loadError}</span>
           <button type="button" onClick={() => void load()} className="font-medium underline">重试</button>
+        </div>
+      )}
+      {saveFeedback && (
+        <div className={`fixed right-5 top-5 z-[60] flex w-[min(24rem,calc(100vw-2.5rem))] items-start gap-3 rounded-2xl border px-4 py-3 shadow-xl ${saveFeedback === "success" ? "border-success/30 bg-success text-white" : "border-danger/30 bg-danger text-white"}`} role={saveFeedback === "success" ? "status" : "alert"}>
+          {saveFeedback === "success" ? <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" /> : <XCircle className="mt-0.5 h-5 w-5 shrink-0" />}
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold">{saveFeedback === "success" ? "设置保存成功" : "设置保存失败"}</div>
+            <div className="mt-1 text-sm text-white/85">{saveFeedback === "success" ? "新的配置已生效。" : saveError ?? "请检查输入后重试。"}</div>
+          </div>
+          <button type="button" onClick={() => setSaveFeedback(null)} className="rounded-md p-1 text-white/75 hover:bg-white/15 hover:text-white" aria-label="关闭提示"><X className="h-4 w-4" /></button>
         </div>
       )}
       {!loading && !loadError && settings && (
