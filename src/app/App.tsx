@@ -8,11 +8,13 @@ import { LogsPage } from "@/pages/logs/LogsPage";
 import { KnowledgeBasePage } from "@/pages/knowledge/KnowledgeBasePage";
 import { SettingsPage } from "@/pages/settings/SettingsPage";
 import { UsagePage } from "@/pages/usage/UsagePage";
+import { ThemeProvider } from "@/hooks/use-theme";
 
 export function App() {
   return (
-    <MemoryRouter>
-      <Routes>
+    <ThemeProvider>
+      <MemoryRouter>
+        <Routes>
         <Route element={<AppLayout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
@@ -24,7 +26,8 @@ export function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
-      </Routes>
-    </MemoryRouter>
+        </Routes>
+      </MemoryRouter>
+    </ThemeProvider>
   );
 }
